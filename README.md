@@ -1,198 +1,197 @@
 # data_acquire
 
-临时多传感器采集网络的数据采集仓库。目标:用**纯 Python 编排(不依赖 ROS)**,
-把 7 台异构传感器(海康相机/鱼眼、禾赛/速腾机械激光雷达、Livox 半固态激光雷达、
-图漾结构光 3D 相机)的数据统一采下来,各自留一份**可直接跑的 demo**,采集产物落到 `data/`。
+临时多传感器采集网络的数据采集仓库。目标:用**纯 Python 编排(不依赖 ROS)**,把 7 台异构传感器
+(海康相机/鱼眼、禾赛/速腾机械激光雷达、Livox 半固态激光雷达、图漾结构光 3D 相机)的数据统一采下来,
+**一个触发即可多路并发协同采集**,各自还留一份**可直接跑的单设备 demo**,采集产物落到 `data/`。
 
-设计上**配置驱动**:`config/rig.yaml` 描述每台设备的 `kind/model/ip/凭证/端口`,
-`acquire/registry.py` 按 `(kind, model)` 派发到驱动;每台传感器另有一个**独立可跑的 demo**
-(本 README 的重点),不依赖编排框架就能单台取数。
+设计上**配置驱动 + 统一抽象**:`config/rig.yaml` 描述每台设备的 `kind/model/ip/凭证/端口`;
+`acquire/registry.py` 按 `(kind, model)` 派发到驱动;每台传感器实现统一的 `Sensor` 接口
+(`connect/start/grab/stop`),`acquire/record.py` 多线程并发采集,落盘 + manifest + 跨传感器对齐索引。
 
-> 本文档记录的是 **2026-07-27 实测确认**的结果:**7 台设备全部可达、全部已采到真数据并落盘**。
+> 本文档反映 **2026-07-27 实测确认 + 框架重构完成**:7 台设备全部可达、全部已采到真数据;
+协同采集入口 `record.py` 已接通全部 7 路。
 
 ---
 
 ## 1. 网络与采集机
 
 - **采集机 IP:`192.168.1.200`**(USB 网卡 `enx68da73ad5e2d`,子网 `192.168.1.0/24`)。
-  > 历史值曾是 `.11`,本会话改为 `.200`;所有 demo 默认值已随之更新。
-- 所有传感器与采集机同子网。**每台网络雷达/相机的「目的 IP / 目的端口」必须在其自身网页里
-  指向 `192.168.1.200`**——它们不会自动跟随采集机 IP。
+- 所有传感器与采集机同子网。**每台网络雷达/相机的「目的 IP / 目的端口」必须在其自身网页里指向
+  `192.168.1.200`**——它们不会自动跟随采集机 IP。
 
 ## 2. 设备总览(实测确认)
 
 | IP | kind | 型号(实测) | SDK | 传输 / 端口 | 产物目录 | 状态 |
 |---|---|---|---|---|---|---|
-| .99  | fisheye         | 海康 DS-2CD6345EWD-IV        | HCNetSDK(ctypes) | TCP 8000,逻辑通道 1 | `data/fisheye_99/`   | ✅ 1920×1920 JPEG |
-| .107 | camera          | 海康 DS-2CD3T46WDA4-L        | HCNetSDK(ctypes) | TCP 8000,逻辑通道 1 | `data/camera_107/`   | ✅ 1920×1080 JPEG |
-| .100 | lidar(半固态) | **Livox HAP**(IndustrialHAP) | Livox-SDK2       | UDP cmd 56000 / point 57000 / imu 58000 / log 59000(主动查询式) | `data/livox_hap/`    | ✅ ~45.4万点/s PCD |
-| .114 | structured_light| **图漾 FM815-IX-E1**(GigE Vision)| Camport4      | GigE,按 IP 发现       | `data/fm815_114/`    | ✅ depth+color+点云 |
-| .201 | lidar_mechanical| 禾赛 QT128                   | HesaiLidar_SDK_2.0 | UDP **2364** + PTC 9347 | `data/hesai_qt128/`  | ✅ ~15万点/帧 PCD |
-| .202 | lidar_mechanical| 速腾 **RSAIRY**              | rslidar_sdk(rs_driver) | UDP msop 6692 / difop 7782 | `data/robosense_202/` | ✅ ~7.9万点/帧 PCD |
-| .205 | lidar_mechanical| 速腾 **RSAIRY**              | rslidar_sdk(rs_driver) | UDP msop 6695 / difop 7785 | `data/robosense_205/` | ✅ ~7.9万点/帧 PCD |
+| .99  | fisheye         | 海康 DS-2CD6345EWD-IV | HCNetSDK(ctypes) | TCP 8000,通道 1 | `data/fisheye_99/` | ✅ JPEG |
+| .107 | camera          | 海康 DS-2CD3T46WDA4-L | HCNetSDK(ctypes) | TCP 8000,通道 1 | `data/camera_107/` | ✅ JPEG |
+| .100 | lidar_solidstate| **Livox HAP**(IndustrialHAP) | Livox-SDK2 | UDP cmd 56000 / point 57000 / imu 58000 / log 59000(主动查询) | `data/livox_hap/` | ✅ ~45万点/s PCD |
+| .114 | structured_light| **图漾 FM815-IX-E1**(GigE Vision) | Camport4 | GigE,按 IP 发现 | `data/fm815_114/` | ✅ depth+color+点云 |
+| .201 | lidar_mechanical| 禾赛 QT128 | HesaiLidar_SDK_2.0 | UDP **2364** + PTC 9347 | `data/hesai_qt128/` | ✅ ~15万点/帧 PCD |
+| .202 | lidar_mechanical| 速腾 **RSAIRY** | rslidar_sdk(rs_driver) | UDP msop 6692 / difop 7782 | `data/robosense_202/` | ✅ PCD |
+| .205 | lidar_mechanical| 速腾 **RSAIRY** | rslidar_sdk(rs_driver) | UDP msop 6695 / difop 7785 | `data/robosense_205/` | ✅ PCD |
 
-补充事实:
-- `.100` Livox:SDK 上报 `dev_type=10`(IndustrialHAP),机壳标注 "HAP (TX)",SN `5CWD239F4105YV1`。
-- `.114` 图漾:机壳/用户称 FM855-E1,但 SDK `ListDevices` 实报型号 **FM815-IX-E1**,`TL version: Gige_2_0`,SN `207000147291`。
-- 速腾 `.202/.205`:经 9 型 decoder head-to-head 实测定为 `RSAIRY`;`bolight_alg` 生产配置 `rslidar_sdk/config/config.yaml` 亦为 `RSAIRY`(其端口旧 +1,已失效)。
+补充:`.100` Livox SN `5CWD239F4105YV1` dev_type=10;`.114` 机壳标 FM855-E1 但 SDK 实报 **FM815-IX-E1**(以 SDK 为准);速腾 `.202/.205` 经 9 型 head-to-head + `bolight_alg` 生产配置定为 RSAIRY。
 
-## 3. `data/` 产物布局
+## 3. 架构(三层)
+
+```
+config/rig.yaml (设备清单: kind/model/ip/端口/凭证)
+        │  acquire/record.py 读
+        ▼
+acquire/registry.py ── (kind, model) 派发 ──► sensors/*_driver.py  (Sensor 子类)
+(多线程并发采集)                                connect → start → 反复 grab → stop
+        │
+        ▼
+data/<run>/<name>/{帧文件} + manifest.jsonl  ;  run 级 index.csv / align.csv
+```
+
+**两类驱动**(都在 `sensors/base.py` 定义):
+- `Sensor`(进程内 poll 型):`grab()` 直接调底层 SDK 拿一帧、自己写文件。→ **海康**(`HikSensor`)。
+- `SubprocessSensor`(子进程型):`start()` 拉起外部已编译 C++ 二进制,它边跑边往 `out_dir` 写文件,
+  `grab()` 增量扫描这些文件返回。分两种取数模型:
+  - **流式型**(`_duration()` 有值):Popen 后台跑 + 轮询增量帧,到时长 terminate。→ 禾赛 / 速腾 / Livox。
+  - **批量型**(`_duration()` 为 None):`subprocess.run` 同步跑完 N 帧再逐帧返回。→ 图漾。
+
+设备自然结束(流式到时 / 批量采完)时 `grab()` 返回 `meta={"ended": True}`,record 据此退出该路线程。
+
+**加一种新传感器 = ① 写一个 `Sensor`/`SubprocessSensor` 子类 + ② 在 `registry.py` 登记 `(kind, model)` 一行 +
+③ 在 `rig.yaml` 加一条设备。**(详见 §9 扩展指南。)
+
+## 4. 快速开始
+
+> 通用前置:终端用 **anaconda `python3`**(`/home/vvd/anaconda3/bin/python3`,带 cv2/yaml/numpy);
+> 相机类还需 `LD_LIBRARY_PATH` 指向海康 SDK 的 lib(LiDAR/结构光的库由各自驱动自动注入)。
+
+### 4.1 协同采集(一触发采全部启用设备)
+```bash
+export LD_LIBRARY_PATH=$PWD/third_party/EN-HCNetSDKV6.1.9.4_build20220412_linux64/lib
+python3 acquire/record.py --duration 10                       # 7 路并发, 全局 10s
+python3 acquire/record.py --only cam_hik,lidar_hesai --tag calib_01   # 只采子集 + 命名 run
+python3 acquire/record.py                                     # 流式按各自 duration 自停, 相机 Ctrl-C 停
+```
+输出:`data/<tag_><时间戳>/<name>/{帧} + manifest.jsonl`,run 根有 `index.csv`(全帧时间轴)与
+`align.csv`(以相机为基准的跨传感器最近邻对齐,供离线配准)。
+
+### 4.2 单设备 demo(各自委托对应 driver,逻辑与 record 复用)
+```bash
+# 海康相机 .107 / 鱼眼 .99
+python3 sensors/camera/grab_demo.py --ip 192.168.1.107 -n 6
+python3 sensors/camera/grab_demo.py --ip 192.168.1.99  -n 6 --out data/fisheye_99
+# 禾赛 QT128 .201(网页设目的IP=.200, udp 2364)
+python3 sensors/lidar_hesai/hesai_demo.py --seconds 10
+# 速腾 .202 / .205(默认 RSAIRY / .202 真实端口)
+python3 sensors/lidar_robosense/robosense_demo.py
+python3 sensors/lidar_robosense/robosense_demo.py --ip 192.168.1.205 --msop 6695 --difop 7785
+# Livox HAP .100(主动查询式, 静态嗅探无流量属正常)
+python3 sensors/lidar_livox/livox_demo.py --seconds 15
+# 图漾结构光 .114
+python3 sensors/structured_light/percipio_demo.py -n 6
+```
+
+### 4.3 可视化(见 `tools/`)
+```bash
+python3 tools/view_depth.py data/fm815_114/depth_0003.png        # uint16 mm 黑图 → 归一化彩色
+python3 tools/view_depth.py data/fm815_114/ --cmap turbo         # 整目录批量
+python3 tools/view_cloud.py data/fm815_114/                      # 多帧点云 ←/→ 翻帧, 空格播放
+python3 tools/view_cloud.py data/hesai_qt128/ --backend auto     # 优先 open3d, 缺则 matplotlib
+```
+
+## 5. `data/` 布局
 
 ```
 data/
-├── camera_107/      海康相机     N× JPEG 1920×1080(设备端编码)
-├── fisheye_99/      海康鱼眼     N× JPEG 1920×1920
-├── hesai_qt128/     禾赛 QT128   ASCII PCD,~15万点/帧
-├── robosense_202/   速腾 RSAIRY  ASCII PCD,~7.9万点/帧
-├── robosense_205/   速腾 RSAIRY  ASCII PCD,~7.9万点/帧
-├── livox_hap/       Livox HAP    ASCII PCD,~5万点/帧(按点数切片)
-└── fm815_114/       图漾结构光   N× {depth 16bit PNG(mm) + color JPG + 点云 PCD(米)}
+├── <tag_时间戳>/            # 协同采集(record.py)的一次 run
+│   ├── cam_hik/            #   每路一个子目录
+│   │   ├── *.jpg
+│   │   └── manifest.jsonl  #   每帧一行: sensor/ts/frame/bytes/payload
+│   ├── lidar_hesai/  ... 
+│   ├── index.csv            #   全帧时间轴(ts, sensor, payload), 按 ts 排序
+│   └── align.csv            #   以相机为基准的跨传感器最近邻对齐(可选)
+├── camera_107/  fisheye_99/  hesai_qt128/  robosense_202/  robosense_205/  livox_hap/  fm815_114/
+│                            # 单设备 demo 直存的扁平目录(见 §2)
+└── fm815_114/{depth_*.png(mm), color_*.jpg, points_*.pcd(米+rgb), *_vis.png(深度彩色版)}
 ```
 
-## 4. 仓库结构
+## 6. 工具链(跨 SDK 通用, 关键)
+
+- **Python**:必须用 anaconda 的 `python3`。系统另有 VSCode 默认选中的裸 `python3.14`(无依赖),用它跑会 `ModuleNotFoundError`。终端 `python3` 即 anaconda。
+- **编译器**:GCC 11(Ubuntu 22.04)。⚠️ 速腾 `rslidar_sdk` 等老 SDK 在 GCC11 下用 `shared_ptr` 却没 `#include <memory>` → 加 `-DCMAKE_CXX_FLAGS="-include memory"`。
+- **系统依赖**:`libpcap-dev`(速腾)、系统 `opencv` 4.5.4(图漾 Camport4 用)、`cmake`。
+- ⚠️ **PCL/VTK 链接坏**:本机有 PCL 头,但 22.04 上 VTK↔libtiff 冲突,任何**链接 PCL 的工具**(如禾赛 `pcl_tool`)都链接失败。**解法:不依赖 PCL,自写回调直接产 ASCII PCD**(禾赛 `sample_pcd`、Livox `pcd_saver`)。
+
+## 7. SDK 编译与改动(概要)
+
+每条 SDK 的**来源/版本/commit/本地改动**详记于 [`third_party/SOURCES.md`](third_party/SOURCES.md);
+每台设备的**采集方案/前置/构建/运行/输出/SDK 改动逐文件说明**见 `sensors/<kind>/README.md`。概要:
+
+| SDK | 设备 | 编译产物 | 本地改动 |
+|---|---|---|---|
+| HCNetSDK V6.1.9.4 | .107/.99 | 预编译 `.so`,免编译 | 无(ctypes 加载) |
+| HesaiLidar_SDK_2.0 | .201 | `build/sample_pcd` | +`test/test_pcd.cc`(回调直写 ASCII PCD 绕 PCL)+ CMakeLists |
+| rslidar_sdk v1.5.20 | .202/.205 | `src/rs_driver/build_rs/tool/rs_driver_pcdsaver` | 无源码改(仅 cmake flag `-include memory`, 只编 rs_driver 免 ROS) |
+| Livox-SDK2 | .100 | `build/samples/livox_lidar_pcd_saver/...` | +`livox_lidar_pcd_saver/`(回调按 50000 点切帧写 PCD)+ CMakeLists |
+| camport4 R4.2.11 | .114 | `sample/build/bin/SimpleView_CaptureDump` | +`SimpleView_CaptureDump/main.cpp`(无头采集: depth+color+点云, 两遍法写 PCD)+ CMakeLists |
+
+关键编译命令见各设备 README 与 SOURCES.md。
+
+## 8. 深度图看起来很黑?——正常
+
+图漾 `depth_*.png` 是 **uint16、单位 mm**。普通图片查看器看着几乎全黑,三因:
+1. 有效深度 560–4160mm 只占 uint16(0–65535)低位一小段,8bit 线性映射后仍暗;
+2. 有效像素仅 ~7%,其余无效区(depth=0/超量程)= 纯黑;
+3. 查看器不按量程归一化。
+
+**数据本身是好的**:同帧 `points_*.pcd` 有 ~2 万个有效点(z≈0.56–4.16m)即证。正确查看:
+`python3 tools/view_depth.py <depth.png>`(按 [400,4500]mm 归一化 + jet/turbo 上色,无效留黑)。
+
+## 9. 扩展指南(加一种新传感器)
+
+1. 在 `sensors/<kind>/` 写一个驱动,继承 `Sensor`(进程内 poll)或 `SubprocessSensor`(外部二进制):
+   - poll 型:实现 `connect/start/grab/stop`(参考 `sensors/camera/hik_driver.py`)。
+   - 子进程型:实现 `_binary/_build_cmd/_env/_duration/_frame_glob` 五个钩子(参考任一 LiDAR driver)。
+2. 在 `acquire/registry.py` 的 `TABLE` 登记一行 `(kind, model) → (impl, cls)`。
+3. 在 `config/rig.yaml` 加一条设备(name/kind/model/ip/端口/`enabled: true`)。
+4. (可选)写一个 `*_demo.py` 薄壳:CLI → spec → 实例化 driver → `capture_once()`。
+
+## 10. 踩坑清单
+
+1. **目的 IP/端口逐台在设备网页改**:雷达不跟随采集机。多为非默认:QT128=2364(非2368)、.202=6692/7782、.205=6695/7785、Livox HAP=56000 系(非 Mid-360 的 56100 系)。**以设备网页实际值为准**。
+2. **Livox-SDK2 主动查询式**:静态嗅探无流量属正常,必须跑 SDK。
+3. **GCC11 + 老 SDK**:加 `-DCMAKE_CXX_FLAGS="-include memory"`。
+4. **PCL/VTK 链接坏**:别用链接 PCL 的工具,自写 ASCII PCD 回调。
+5. **速腾顶层编不过**:只编 `src/rs_driver/`(关 ROS)。
+6. **RSAIRY vs RSFAIRY**:同包不同垂直角表,按硬件/生产配置选;默认 RSAIRY。
+7. **HAP frame_cnt 恒 0**:按点数(50000)切片分帧。
+8. **海康通道**:SDK 逻辑通道从 1 起,RTSP/ISAPI 是 101/102。
+9. **图漾 SDK**:用 Camport4(V4 API),非 VcameraSDK、非 Camport3。
+10. **凭证**:仅海康相机需登录(`admin` / `b@light2.`);LiDAR/结构光走 UDP/SDK 主动查询,无凭证。
+
+## 11. 仓库结构
 
 ```
 data_acquire/
-├── config/rig.yaml            # 设备清单(配置驱动核心)
-├── acquire/                   # 编排: 读 rig.yaml → registry 派发 → 落盘
-│   ├── registry.py            #   (kind, model) → 驱动 派发表
-│   └── record.py              #   采集主程序
-├── sensors/                   # 每种传感器一个子目录 + 独立 demo
-│   ├── base.py                #   统一接口 Sensor + Sample
-│   ├── camera/                #   海康: sdk_grabber.py(HikGrabber) + grab_demo.py + hik_driver.py
-│   ├── lidar_hesai/           #   禾赛: hesai_demo.py + qt128_online_201.ini
-│   ├── lidar_robosense/       #   速腾: robosense_demo.py
-│   ├── lidar_livox/           #   Livox: livox_demo.py + hap_host200.json(+ mid360_host200.json 备选)
-│   └── structured_light/      #   .114 图漾: percipio_demo.py(包 Camport4 SimpleView_CaptureDump)
-├── third_party/               # 厂商 SDK(仓库自包含)
-│   ├── EN-HCNetSDKV6.1.9.4_build20220412_linux64/  # 海康(预编译 .so)
-│   ├── HesaiLidar_SDK_2.0/                         # 禾赛(自编 + 自加 sample_pcd)
-│   ├── rslidar_sdk-v1.5.20/                        # 速腾(只编 src/rs_driver)
-│   ├── Livox-SDK2/                                 # Livox(自编 + 自加 pcd_saver 样例)
-│   ├── camport4/                                   # 图漾 Camport4(预编译 .so + 自编 sample)
-│   ├── Camport3/  Livox-SDK/                       # 历史旧版, 已弃用(保留备查)
-│   └── EN-HCNetSDK.../                             # (同上)
-└── data/                      # 采集输出(.gitignore)
+├── config/rig.yaml           # 设备清单(配置驱动核心)
+├── acquire/                  # 编排层
+│   ├── registry.py           #   (kind, model) → 驱动 派发表
+│   └── record.py             #   协同采集主程序(多路并发 + manifest + 对齐)
+├── sensors/                  # 统一接口 + 各厂商驱动
+│   ├── base.py               #   Sensor / SubprocessSensor / Sample / capture_once
+│   ├── camera/               #   海康: sdk_grabber + hik_driver + grab_demo
+│   ├── lidar_hesai/          #   禾赛: hesai_driver + hesai_demo
+│   ├── lidar_robosense/      #   速腾: robosense_driver + robosense_demo
+│   ├── lidar_livox/          #   Livox: livox_driver + livox_demo + hap/mid360 json
+│   └── structured_light/     #   图漾: percipio_driver + percipio_demo
+├── tools/                    # 离线查看
+│   ├── view_depth.py         #   uint16 mm 深度图 → 归一化彩色
+│   └── view_cloud.py         #   多帧点云 ←/→ 翻帧(open3d / matplotlib)
+├── third_party/              # 厂商 SDK(自包含; 来源/改动见 SOURCES.md)
+└── data/                     # 采集输出(.gitignore)
 ```
 
----
+## 12. 进度
 
-## 5. 工具链(关键, 跨 SDK 通用)
-
-- **Python**:必须用 anaconda 的 `python3`(`/home/vvd/anaconda3/bin/python3`,带 `requests`/`opencv-python`/`pyyaml`)。
-  系统另有 VSCode 自动选中的裸 `python3.14`(uv 管理,无依赖),用它跑会 `ModuleNotFoundError`。终端里 `python3` 即 anaconda。
-- **编译器**:GCC 11(Ubuntu 22.04)。
-  - ⚠️ **老厂商 SDK 兼容坑**:速腾 `rslidar_sdk`、老 `Livox-SDK` v1 在 GCC11 下用 `std::shared_ptr`/`std::make_shared` 却没 `#include <memory>` → 编译报 `'shared_ptr' is not a member of 'std'`。
-    **统一解法**:`cmake` 加 `-DCMAKE_CXX_FLAGS="-include memory"` 强制预包含。
-- **系统依赖**:`libpcap-dev`(速腾)、`opencv` 4.5.4(系统自带,图漾 Camport4 用)、`cmake`。
-- ⚠️ **PCL/VTK 链接坏**:本机有 PCL 头(`/usr/include/pcl-1.12`),但 Ubuntu 22.04 上 VTK↔libtiff 冲突,任何**链接 PCL 的工具**(如禾赛 `pcl_tool`)都因 `libvtkIOImage` 里 `TIFF…@LIBTIFF_4.0` 未定义而链接失败。
-  **解法**:不依赖 PCL,**自写回调直接产 ASCII PCD**(见禾赛 `sample_pcd`、Livox `livox_lidar_pcd_saver`)。PCD 头 `FIELDS x y z intensity … / DATA ascii`,纯文本,免链接。
-
----
-
-## 6. 各 SDK 编译过程(逐个, 含原因)
-
-### 6.1 海康 HCNetSDK(.99 / .107)— 预编译, 免编译
-- 位置:`third_party/EN-HCNetSDKV6.1.9.4_build20220412_linux64/lib/`,需含
-  `libhcnetsdk.so`、`HCNetSDKCom/`、`libcrypto.so.1.1`、`libssl.so.1.1`、`libPlayCtrl.so`。
-- `sdk_grabber.py` 用 ctypes 按绝对路径加载 `libhcnetsdk.so`;运行时需 `LD_LIBRARY_PATH` 指向该 `lib/`(传递依赖)。
-- 凭证:`admin` / `b@light2.`(两台同;密码含 `@`,RTSP URL 里要 URL-encode 成 `%40`)。
-- 通道:**SDK 逻辑通道从 1 起**(`NET_DVR_CaptureJPEGPicture`);RTSP/ISAPI 流号是 101(主)/102(副),别混。
-
-### 6.2 禾赛 HesaiLidar_SDK_2.0(.201 QT128)
-```bash
-cd third_party/HesaiLidar_SDK_2.0 && mkdir -p build && cd build
-cmake .. && make -j
-# -> build/sample(帧统计)、build/sample_pcd(自加, 按帧写 ASCII PCD)
-```
-- **自加目标 `sample_pcd`**:在 `CMakeLists.txt` 的 `if(NOT DISENABLE_TEST_CC)` 内加 `add_executable(sample_pcd test/test_pcd.cc)` 并链 `hesai_sdk_lib`;
-  `test/test_pcd.cc` 仿官方 `test.cc`,但回调 `lidarCallback` 直接写 ASCII PCD(点类型 `LidarPointXYZICRT`:x/y/z float、intensity/confidence uint8、ring uint16、timestamp double),输出目录走环境变量 `PCD_OUT`。**目的:绕开链接失败的 `pcl_tool`。**
-- 配置 `sensors/lidar_hesai/qt128_online_201.ini`:`source_type=network`、`device_ip_address=192.168.1.201`、`ptc_port=9347`、`use_ptc_connected=true`、**`udp_port=2364`**。
-  > ⚠️ **QT128 实测目的端口是 2364,不是默认 2368!** 以雷达网页(Pandar Console)Lidar Destination Port 实际值为准。
-
-### 6.3 速腾 rslidar_sdk v1.5.20(.202 / .205 RSAIRY)
-```bash
-cd third_party/rslidar_sdk-v1.5.20/src/rs_driver && mkdir -p build_rs && cd build_rs
-cmake -DCOMPILE_DEMOS=ON -DCOMPILE_TOOL_PCDSAVER=ON -DCMAKE_CXX_FLAGS="-include memory" ..
-make -j
-# -> tool/rs_driver_pcdsaver + demo/demo_online[_multi_lidars] 等
-```
-- ⚠️ **只编 `src/rs_driver/`,不编顶层**:顶层 `rslidar_sdk_node` 在关闭 ROS 时引用未声明的 ROS 符号(`SourcePacketRos` 等),编不过;`rs_driver` 子目录自包含、免 ROS。
-- ⚠️ 必须加 `-include memory`(GCC11 老代码坑,见 §5)。
-- 在线取数:`rs_driver_pcdsaver -type RSAIRY -msop <port> -difop <port> -host 192.168.1.200`。
-- **型号识别过程**:`pcdsaver` 必须给 `-type`,错型要么刷 `ERRCODE_WRONGMSOPBLKID`(块ID不匹配)、要么出几百点/帧的平面垃圾。本机 `.202/.205` 的 MSOP 头是 `55aa055a` + V2 头部(`lidar_model` 字节=0x31),排除 RS16/32/RSBP(`ff ee`/8字节头)与 M1/M2/E1(`55aa5aa5`)。对 9 个 V2 候选 head-to-head:唯 **`RSAIRY`** 零报错 + ~8.3万点/帧真 3D 点云。
-  - **RSAIRY vs RSFAIRY**:两者同包格式、不同垂直角表(SDK 无法从包内区分),实测 `RSFAIRY` z 可达 ~26m、`RSAIRY` z ~6m。本仓库按生产配置(`bolight_alg`)默认 **`RSAIRY`**;若硬件实为 RS-Fairy,改 `--type RSFAIRY`。
-
-### 6.4 Livox-SDK2(.100 HAP)
-```bash
-cd third_party/Livox-SDK2 && mkdir -p build && cd build
-cmake .. && make -j
-# -> build/samples/livox_lidar_pcd_saver/livox_lidar_pcd_saver 等(+ liblivox_lidar_sdk_shared.so)
-```
-- GCC11 直接编过(比老 `Livox-SDK` v1 干净,且 v1 不支持 Mid-360/HAP,故弃用 v1)。
-- **自加样例 `livox_lidar_pcd_saver`**(在 `samples/livox_lidar_pcd_saver/`,并登记进 `samples/CMakeLists.txt`):仿官方 `livox_lidar_quick_start` 的 init/Normal 模式流程,**只把点云回调改成按帧写 ASCII PCD**。
-  - 点格式:`data_type=1` → `LivoxLidarCartesianHighRawPoint`(int32 xyz, 单位 mm + reflectivity + tag),存盘时 mm→m。
-  - ⚠️ **HAP 的 `frame_cnt` 实测恒为 0**(不随旋转递增),**不能用它分帧**;saver 改为**每累积 50000 点切一帧**(约 10Hz)。
-  - 环境变量:`PCD_OUT`(输出目录,需预创建)、`LIVOX_RUN_SECS`(运行秒数)。运行时 `LD_LIBRARY_PATH` 需含 `build/sdk_core`。
-- 配置 `sensors/lidar_livox/hap_host200.json`:顶层 key `"HAP"`;`host_net_info.host_ip=192.168.1.200`;端口 cmd 56000 / point 57000 / imu 58000 / log 59000。
-  > ⚠️ **Livox-SDK2 是「主动查询式」发现**(SDK 先广播查询、雷达应答),不像禾赛/速腾被动持续推流。所以**静态 UDP 嗅探看不到流量是正常的,必须跑 SDK 才出数据**。另:HAP 端口(56000 系)与 Mid-360(56100 系)完全不同,别照搬 Mid-360。备选 `mid360_host200.json` 保留。
-
-### 6.5 图漾 Camport4(.114 FM815-IX-E1)
-```bash
-cd third_party/camport4/sample && mkdir -p build && cd build
-cmake .. -DTYCam_DIR=$(cd ../.. && pwd) -DARCH=x64 -DBUILD_SAMPLE_V2=OFF -DBUILD_SAMPLE_GENICAM_SFNC=OFF
-make -k -j
-# -> sample/build/bin/{ListDevices, SimpleView_OpenWithIP, SimpleView_FetchFrame, SimpleView_Point3D, ...}
-```
-- `TYCam_DIR` 指 `camport4/` 根(含 `TYCamConfig.cmake`),`ARCH=x64` 选 `lib/linux/lib_x64/libtycam.so.4.2.11`(+ `libtyimgproc.so.1.1.0`)。
-- 需系统 opencv(本机 4.5.4)。运行时 `LD_LIBRARY_PATH` 需含 `camport4/lib/linux/lib_x64`。
-- **关键确认**:`bin/ListDevices` 已成功枚举到 `.114`(Percipio FM815-IX-E1,GigE Vision,SN 207000147291)。
-  > 用 **Camport4**(较新,V4 API `TYApi.h`)。**不是 VcameraSDK**(用户已确认并删除),也不是老的 Camport3。
-- **自编无头采集 sample `SimpleView_CaptureDump`**(在 `sample/sample_v1/`,登记进 `ALL_SAMPLES`):仿 `FetchFrame`/`Point3D` 但去掉 GUI/键盘,取 N 帧各落盘 `depth_%04d.png`(uint16 mm)、`color_%04d.jpg`(原分辨率 BGR)、`points_%04d.pcd`(ASCII,米,带 rgb)。点云路径:`TYMapRGBImageToDepthCoordinate`(彩色贴到深度分辨率)→ `TYMapDepthImageToPoint3d`(depth_calib);`write_pcd` 两遍法先数有效点(depth=0 投影为 NaN)再写,`POINTS` 头与数据行数一致。**实测**:depth 640×480(mm,量程 0.56–4.16m,有效 ~7%)、color 2560×1920、点云 ~2万点/帧。
-- **Python demo** `sensors/structured_light/percipio_demo.py` 调它,默认 `-ip 192.168.1.114 -n 6 -outdir data/fm815_114`,自动注入 `LD_LIBRARY_PATH`。
-
----
-
-## 7. demo 运行命令(实测可用)
-
-通用前置:终端用 anaconda `python3`;SDK 类脚本按需 `export LD_LIBRARY_PATH`(下见)。
-
-```bash
-# 海康相机 .107 / 鱼眼 .99(默认存 data/camera_<末段>; 鱼眼用 --out 命名)
-export LD_LIBRARY_PATH=$PWD/third_party/EN-HCNetSDKV6.1.9.4_build20220412_linux64/lib
-python3 sensors/camera/grab_demo.py --ip 192.168.1.107 -n 6
-python3 sensors/camera/grab_demo.py --ip 192.168.1.99  -n 6 --out data/fisheye_99
-
-# 禾赛 QT128 .201(配置 qt128_online_201.ini, udp 2364)
-python3 sensors/lidar_hesai/hesai_demo.py
-
-# 速腾 .202 / .205(默认 .202 / RSAIRY / .200)
-python3 sensors/lidar_robosense/robosense_demo.py --type RSAIRY
-python3 sensors/lidar_robosense/robosense_demo.py --ip 192.168.1.205 --msop 6695 --difop 7785 --type RSAIRY
-
-# Livox HAP .100(默认 hap_host200.json)
-python3 sensors/lidar_livox/livox_demo.py --seconds 15
-
-# 图漾结构光 .114(LD_LIBRARY_PATH 由 demo 自动注入)
-python3 sensors/structured_light/percipio_demo.py -n 6          # 默认 -> data/fm815_114
-# 手动验证设备: cd third_party/camport4 && LD_LIBRARY_PATH=$PWD/lib/linux/lib_x64 ./sample/build/bin/ListDevices
-```
-
-## 8. 跨设备踩坑清单(深度总结)
-
-1. **目的 IP/端口必须逐台在设备网页改**:雷达不会跟随采集机。端口多为**非默认**:QT128=2364(非2368)、.202=6692/7782、.205=6695/7785、Livox HAP=56000系(非 Mid-360 的 56100 系)。**永远以设备网页实际值为准**。
-2. **Livox-SDK2 主动查询式**:静态嗅探无流量属正常,必须跑 SDK。
-3. **GCC11 + 老 SDK**:加 `-DCMAKE_CXX_FLAGS="-include memory"`。
-4. **PCL/VTK 链接坏(22.04)**:别用链接 PCL 的工具,自写 ASCII PCD 回调。
-5. **速腾顶层编不过**:只编 `src/rs_driver/`(关 ROS)。
-6. **RSAIRY vs RSFAIRY**:同包不同垂直角表,按硬件/生产配置选;默认 RSAIRY。
-7. **HAP frame_cnt 恒 0**:按点数切片分帧。
-8. **海康通道**:SDK 逻辑通道从 1 起,RTSP/ISAPI 是 101/102。
-9. **采集机 IP**:现为 `.200`(曾 `.11`);`bolight_alg` 旧配置端口在此基础上 +1,已失效。
-10. **图漾 SDK**:用 Camport4(V4 API),非 VcameraSDK、非 Camport3。
-
-## 9. 进度
-
-- ✅ **7 台全部可达(ping / 发现),且 7 台全部已采到真数据并落盘 `data/`**:.99、.107、.201、.202、.205、.100、.114。
-- ✅ `.114` 图漾 FM815-IX-E1:Camport4 `SimpleView_CaptureDump` 取 depth(640×480 mm)+ color(2560×1920)+ 点云(~2万点/帧,0.56–4.16m),已存 `data/fm815_114/`。
-- ⏳ 配置驱动编排层(`config/rig.yaml` + `acquire/registry.py` + `record.py` 多线程统一采集、输出 MCAP):架构已搭,各 `Sensor` 驱动包装待按 demo 收敛后统一接入。
+- ✅ **7 台全部可达 + 全部已采到真数据**:.99 / .107 / .201 / .202 / .205 / .100 / .114。
+- ✅ **统一框架重构完成**:`Sensor`/`SubprocessSensor` 抽象 + `(kind,model)` registry + 全 7 路 driver 接入 +
+  `record.py` 多路协同采集(manifest/index/align)+ demo 薄壳化 + 可视化工具。
+- ✅ 已知 bug 修复:Hesai demo 改用产 PCD 的 `sample_pcd`(原误用只统计的 `sample`);RoboSense 输出落 `data/`。

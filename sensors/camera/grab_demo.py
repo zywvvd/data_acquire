@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""海康 SDK 抓图 demo —— 相机(.107)/鱼眼(.99) 共用。
+"""海康 SDK 抓图 demo(薄壳: 委托 hik_driver.HikSensor)。相机 .107 / 鱼眼 .99 共用。
 
 登录一次, 连抓 N 张设备端编码 JPEG(NET_DVR_CaptureJPEGPicture, 走 HCNetSDK/libhcnetsdk.so)。
-复用本目录 sdk_grabber.HikGrabber。
+本脚本只做 CLI → spec 映射, 采集逻辑全部在 HikSensor / HikGrabber 里(record.py 多路协同也复用同一驱动)。
 
 依赖:
   - anaconda python3
-  - LD_LIBRARY_PATH 指向仓库内 SDK 的 lib, 例如:
+  - LD_LIBRARY_PATH 指向仓库内 SDK 的 lib:
       export LD_LIBRARY_PATH=$PWD/third_party/EN-HCNetSDKV6.1.9.4_build20220412_linux64/lib
 
-运行(两台同一脚本, 不同 IP/通道; 默认存 data/ 下):
-  # 相机 .107  -> data/camera_107/
-  python3 sensors/camera/grab_demo.py --ip 192.168.1.107 --channel 1 -n 6
-  # 鱼眼 .99   -> data/fisheye_99/(用 --out 命名)
-  python3 sensors/camera/grab_demo.py --ip 192.168.1.99 --channel 1 -n 6 --out data/fisheye_99
+运行(两台同一脚本, 不同 IP; 默认存 data/ 下):
+  python3 sensors/camera/grab_demo.py --ip 192.168.1.107 -n 6               # 相机 -> data/camera_107/
+  python3 sensors/camera/grab_demo.py --ip 192.168.1.99 -n 6 --out data/fisheye_99
 """
 import argparse
 import os
 import sys
-import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
-from sdk_grabber import HikGrabber  # noqa: E402
+sys.path.insert(0, _ROOT)
+
+from sensors.camera.hik_driver import HikSensor   # noqa: E402
+from sensors.base import capture_once             # noqa: E402
 
 
 def main():
@@ -40,18 +41,13 @@ def main():
     out = args.out or os.path.join("data", "camera_" + args.ip.split(".")[-1])
     os.makedirs(out, exist_ok=True)
 
+    spec = {"ip": args.ip, "port": args.port, "user": args.user,
+            "password": args.pwd, "channel": args.channel}
+    s = HikSensor("camera", spec)
+    s.out_dir = out
     print(f"连接 {args.ip}:{args.port}  user={args.user}  channel={args.channel}  -> {out}")
-    with HikGrabber(host=args.ip, port=args.port, user=args.user,
-                    pwd=args.pwd, channel=args.channel) as g:
-        for i in range(1, args.n + 1):
-            path = os.path.join(out, f"{args.ip}_ch{args.channel}_{i:04d}.jpg")
-            t0 = time.monotonic()
-            ms = g.capture(path)
-            wall = (time.monotonic() - t0) * 1000
-            sz = os.path.getsize(path) if os.path.exists(path) else 0
-            print(f"  [{i}/{args.n}] {os.path.basename(path)}  {sz}B  "
-                  f"capture={ms:.0f}ms  wall={wall:.0f}ms")
-    print("done")
+    n = capture_once(s, max_frames=args.n)
+    print(f"done: {n} 张 JPEG -> {out}")
 
 
 if __name__ == "__main__":
