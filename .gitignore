@@ -1,0 +1,29 @@
+# ===== 采集输出 =====
+data/*
+!data/.gitkeep
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+
+# ===== 第三方 SDK 构建产物(源码本身入库, 构建产物不入; 含嵌套 build/build_rs) =====
+**/build/
+**/build_rs/
+**/install/
+*.pcd
+*.pcap
+*.bag
+*.mcap
+
+# ===== 旧 camera 脚本的单拍/对照输出 =====
+captures/
+grabs/
+snap_*.jpg
+sdk_test.jpg
+opencv_frame.jpg
+probe.jpg
+cmp_*.jpg
+
+# ===== 编辑器 =====
+.vscode/
+.idea/

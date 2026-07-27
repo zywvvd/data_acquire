@@ -1,0 +1,122 @@
+# =============================================================================
+# 临时多传感器采集网络 — 设备清单 (rig configuration)
+# 网段: 192.168.1.0/24   采集机当前 IP: 192.168.1.200  网卡: enx68da73ad5e2d
+# 实测确认: 2026-07-27  (7 台设备全部可达 + 全部采到真数据, 见 data/ 与 README)
+#
+# 字段约定:
+#   name      设备句柄(唯一, 用作输出目录名 / 后续 topic 名)
+#   kind      设备大类  → registry 按 kind 派发到对应驱动家族
+#   model     具体型号(已实测确认)
+#   sdk       对应 third_party/ 下的厂商 SDK(来源/版本/本地改动见 third_party/SOURCES.md)
+#   ip        设备 IP
+#   mac       设备 MAC(OUI 厂商段, IP 会变时靠它认设备)
+#   enabled   false=临时不采这台
+#   其余字段按 kind 不同(见各条)
+# =============================================================================
+
+devices:
+
+  # ---------------- 普通摄像头 (海康) ----------------
+  - name: cam_hik
+    kind: camera
+    model: DS-2CD3T46WDA4-L
+    sdk: HCNetSDK                      # third_party/EN-HCNetSDKV6.1.9.4... (ctypes)
+    ip: 192.168.1.107
+    mac: "04:03:12:52:6e:df"
+    port: 8000                         # 海康 SDK 端口; ISAPI 走 80
+    user: admin
+    password: "b@light2."              # 与 sensors/camera/ 脚本一致; 建议后续挪到 env/secret
+    channel: 1                         # SDK 逻辑通道从 1 起(RTSP/ISAPI 主码流=101, 勿混)
+    enabled: true
+
+  # ---------------- 鱼眼相机 (海康) ----------------
+  - name: fisheye_hik
+    kind: fisheye
+    model: DS-2CD6345EWD-IV            # 海康全景鱼眼系列
+    sdk: HCNetSDK
+    ip: 192.168.1.99
+    mac: TBD                           # 待抓(未在 ARP 轮采集到)
+    port: 8000
+    user: admin
+    password: "b@light2."
+    channel: 1
+    enabled: true
+    note: "全景鱼眼; 采集后展开需 dewarp"
+
+  # ---------------- 结构光 (图漾 Percipio) ----------------
+  - name: structured_light
+    kind: structured_light
+    model: FM815-IX-E1                 # SDK ListDevices 实报(机壳/采购标签写 FM855-E1)
+    sdk: Camport4                      # third_party/camport4 (V4 API TYApi.h)
+    ip: 192.168.1.114
+    mac: "06:2d:8c:35:16:31"           # SDK 上报的 device MAC
+    transport: gigevision              # GigE Vision, GVCP 广播发现 + GVSP 取流; 无登录凭证
+    enabled: true                      # 已采通: depth(640×480 mm)+color(2560×1920)+点云(~2万点/帧)
+    note: "无凭证; demo: sensors/structured_light/percipio_demo.py"
+
+  # ---------------- 半固态激光雷达 (Livox HAP) ----------------
+  - name: lidar_solid_livox
+    kind: lidar_solidstate
+    model: Livox HAP                   # 机壳 "HAP (TX)", SDK 报 dev_type=10 IndustrialHAP
+    sdk: Livox-SDK2                    # third_party/Livox-SDK2 (主动查询式发现, 非被动推流)
+    ip: 192.168.1.100
+    mac: "48:1c:b9:ac:ff:7e"           # OUI = SZ DJI → Livox
+    discovery: query                   # SDK2 主动查询式; 静态嗅探看不到流量属正常
+    cmd_data_port: 56000               # HAP 端口(Mid-360 是 56100 系, 完全不同, 勿照搬)
+    point_data_port: 57000
+    imu_data_port: 58000
+    log_data_port: 59000
+    enabled: true
+    note: "frame_cnt 恒 0, saver 按每 50000 点切帧(~10Hz)"
+
+  # ---------------- 机械激光雷达: 禾赛 ----------------
+  - name: lidar_hesai
+    kind: lidar_mechanical
+    model: Hesai QT128
+    sdk: HesaiLidar_SDK_2.0            # third_party/HesaiLidar_SDK_2.0 (自加 sample_pcd 免 PCL)
+    ip: 192.168.1.201
+    mac: "ec:9f:0d:01:3d:55"
+    data_port: 2364                    # ⚠️ 实测目的端口 2364(非默认 2368!), 以 Pandar Console 实际值为准
+    ptc_port: 9347
+    web_port: 80                       # 配置页 "Pandar Console"
+    enabled: true
+
+  # ---------------- 机械激光雷达: 速腾 RoboSense ×2 (RSAIRY) ----------------
+  - name: lidar_robosense_front
+    kind: lidar_mechanical
+    model: RSAIRY                      # 9 型 head-to-head 实测 + bolight 生产配置印证
+    sdk: rslidar_sdk                   # third_party/rslidar_sdk-v1.5.20 (只编 src/rs_driver, 免 ROS)
+    ip: 192.168.1.202
+    mac: "08:48:57:02:11:9c"           # OUI = Suteng Innovation(速腾)
+    msop_port: 6692                    # UDP 主数据流
+    difop_port: 7782                   # UDP 设备控制/状态
+    web_port: 80
+    enabled: true
+    note: "RS-Fairy 则 model=RSFAIRY(同包不同垂直角表, z 可达 26m)"
+
+  - name: lidar_robosense_rear
+    kind: lidar_mechanical
+    model: RSAIRY
+    sdk: rslidar_sdk
+    ip: 192.168.1.205
+    mac: "08:48:57:04:cf:13"
+    msop_port: 6695
+    difop_port: 7785
+    web_port: 80
+    enabled: true
+
+# =============================================================================
+# 采集机
+# =============================================================================
+host:
+  ip: 192.168.1.200
+  iface: enx68da73ad5e2d
+  note: "当前用这台做采集; 正式部署换专用机时改这里 + 重指各 LiDAR 网页目的 IP 到新采集机"
+
+# =============================================================================
+# 备注
+# =============================================================================
+# - 各网络 LiDAR / 相机的「目的 IP / 端口」须在其自身网页指向采集机(192.168.1.200),
+#   它们不会自动跟随采集机 IP。端口多为非默认, 以设备网页实际值为准。
+# - 采集所需凭证仅海康相机(admin/b@light2.); LiDAR / 结构光走 UDP / SDK 主动查询, 无凭证。
+# - 待办: 抓 .99 鱼眼的 MAC 补上。
