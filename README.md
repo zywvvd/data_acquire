@@ -174,8 +174,12 @@ data/
 3. 查看器不按量程归一化。
 
 数据本身正常。有效率随**摆位与场景**变化很大(平放桌面、前景<0.59m 时仅 ~7%、~2 万点;
-填满甜区 + 1280×960 满分辨率时 ~33%、~40 万点)。点云密度、深度计算、调参与佐证
-见 [`sensors/structured_light/STRUCTURED_LIGHT.md`](sensors/structured_light/STRUCTURED_LIGHT.md)。
+填满甜区 + 1280×960 满分辨率时 ~33%、~40 万点)。
+
+**量程 0.59–4.4m(两端硬边界),深度精度 ∝ Z²**:实测 0.7mm@0.6m → 12mm@3.3m
+(子像素视差 σ_d≈0.13px;最佳折中 1–2m)。点云密度、深度几何、量程极限计算、距离-精度实测曲线、
+调参与全部佐证见 [`sensors/structured_light/STRUCTURED_LIGHT.md`](sensors/structured_light/STRUCTURED_LIGHT.md)
+(§3 深度几何 / §4 量程极限 / §5 距离-精度实测,配图在 `sensors/structured_light/assets/`)。
 正确查看深度:
 `python3 tools/view_depth.py <depth.png>`(按 [400,4500]mm 归一化 + jet/turbo 上色,无效留黑)。
 

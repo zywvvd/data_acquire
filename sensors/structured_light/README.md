@@ -11,8 +11,11 @@
   非 Gige_2_1;故 SDK 对 LASER/IR 的设置全部有效。
 - 量级:IR 原生 1280×960(双目), depth 默认采 **1280×960** 满分辨率(640×480 是其降采样)、
   color 2560×1920。满分辨率下单帧 **~40 万有效点**(摆位填满甜区时;平放桌面前景过近会跌到 ~7%)。
-  **工作量程 ≈ 0.59–4.4m**(由视差搜索范围 + 基线 99.89mm + 焦距几何决定, 非规格书标称;
-  推导见 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md))。
+- **工作量程 0.59–4.4m**(由视差搜索窗 + 基线 99.89mm + 焦距几何决定,两端硬边界,实测越界墙消失)。
+- **深度精度(实测,平面墙)**:0.7mm@0.6m → 12mm@3.3m,**∝ Z²**(子像素视差 σ_d≈0.13px)。
+  最佳折中 **1–2m**(毫米级、有效率>90%);亚毫米要靠近到 0.6m;>3m 不建议(精度停 ~12mm + 有效率塌)。
+  完整 9 点曲线、原理推导、量程极限计算见 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md) §3–§5
+  (配图 `assets/precision_vs_distance.png`)。
 
 ## 采集方案
 
@@ -70,8 +73,12 @@ LD_LIBRARY_PATH=third_party/camport4/lib/linux/lib_x64 \
 
 ## 深度图看起来很黑?——正常
 
-`depth_*.png` 是 uint16(mm),普通查看器看着全黑(有效值只占 uint16 低位 + 93% 无效区=0 + 不归一化)。
-**数据有效**(同帧 PCD 有 ~2 万有效点为证)。正确查看:
+`depth_*.png` 是 uint16(mm),普通查看器看着全黑(有效值只占 uint16 低位 + 大量无效区=0 + 不归一化)。
+**数据有效**(同帧点云有几十万有效点为证)。按量程归一化 + jet 上色后才是真容:
+
+![深度图 jet 上色后(墙 @1m,暖=近冷=远,黑=无效)](assets/depth_view.png)
+
+正确查看:
 ```bash
 python3 tools/view_depth.py data/fm815_114/depth_0003.png   # 按 [400,4500]mm 归一化 + jet 上色
 python3 tools/view_cloud.py data/fm815_114/                  # 多帧点云翻帧
@@ -117,6 +124,10 @@ python3 tools/view_cloud.py data/fm815_114/                  # 多帧点云翻�
   贴到干净几何上,凹槽(靠颜色才看得见)就跟着弯(CloudCompare 关掉 RGB 颜色即变直 = 证据)。`main.cpp`
   已在贴图前用 `TYUndistortImage`(设备出厂 RGB 畸变系数,Percipio 12 系数模型)**自动去畸变**,
   故 `color_*.jpg` 和点云颜色都是直的。测量若要绝对保险,直接用不带色的几何点云。详 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md) §9。
+- **标定参数能自己重新标定吗?** 设备出厂标定只读、API 不能写回;主机端可读出用自己的标定覆盖重算。
+  RGB 内参+畸变能自标(棋盘格+OpenCV,容易);**双目外参(基线/整流,决定深度量程精度)出厂锁死标不了**,
+  要覆盖等于自己重写立体匹配。但据现有证据(1m 平整度 1.4mm、量程吻合、depth=z)深度标定是准的,先量已知尺寸
+  验证再决定。详 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md) §10。
 - 深度图全黑:正常,见上「深度图看起来很黑」。
 - 用 Camport4(V4 API),**不是** VcameraSDK(已删)、也不是老 Camport3。
 - 找不到设备:确认 `.114` 与采集机同子网、GigE Vision 广播可达(跑 `ListDevices` 验证)。
