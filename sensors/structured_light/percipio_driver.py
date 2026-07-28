@@ -49,6 +49,7 @@ class PercipioSensor(SubprocessSensor):
         cmd = [BINARY,
                "-ip", str(s.get("ip", "192.168.1.114")),
                "-n", str(s.get("frames", 6)),
+               "-dmode", str(s.get("dmode", 1280)),   # 满分辨率深度, 比 640 多 4× 点, 精度不降
                "-outdir", os.path.abspath(self.out_dir)]
         if s.get("no_align"):
             cmd.append("-noalign")

@@ -7,7 +7,10 @@
 
 - IP `192.168.1.114`;GigE Vision,SN `207000147291`,SDK `ListDevices` 实报型号 **FM815-IX-E1**
   (机壳/采购标签写 FM855-E1,以 SDK 实测为准)。
-- 量级:depth 640×480(mm,量程 0.56–4.16m,有效 ~7%)、color 2560×1920、点云 ~2 万点/帧。
+- 量级:IR 原生 1280×960(双目), depth 默认采 **1280×960** 满分辨率(640×480 是其降采样)、
+  color 2560×1920。满分辨率下单帧 **~40 万有效点**(摆位填满甜区时;平放桌面前景过近会跌到 ~7%)。
+  **工作量程 ≈ 0.59–4.4m**(由视差搜索范围 + 基线 99.89mm + 焦距几何决定, 非规格书标称;
+  推导见 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md))。
 
 ## 采集方案
 
@@ -46,7 +49,7 @@ cd third_party/camport4 && LD_LIBRARY_PATH=$PWD/lib/linux/lib_x64 ./sample/build
 ## 输出
 
 每帧三件(同编号):
-- `depth_%04d.png` — uint16,**单位 mm**(量程 0.56–4.16m);
+- `depth_%04d.png` — uint16,**单位 mm**(有效值约 558–4164mm, 见上工作量程);
 - `color_%04d.jpg` — 原分辨率 BGR;
 - `points_%04d.pcd` — ASCII,`FIELDS x y z r g b`,**单位米**。
 
@@ -65,6 +68,8 @@ python3 tools/view_cloud.py data/fm815_114/                  # 多帧点云翻�
   但去 GUI/键盘。每帧落 `depth_%04d.png`(uint16 mm)/ `color_%04d.jpg` / `points_%04d.pcd`。
   `write_pcd` **两遍法**(先数有效点,depth=0 投影为 NaN)使 `POINTS` 头与数据行一致;点云 `/1000` 转米,
   `TYMapRGBImageToDepthCoordinate`+`TYMapDepthImageToPoint3d`。
+  扩展诊断/调参开关: `-dmode 1280`(满分辨率深度, 默认)/ `-ir`(同时抓左右原始 IR)/ `-ire/-irg`(IR 曝光·增益)/
+  `-uniq/-nolrc`(放宽 SGBM 换密度)。每次启动**锁定 IR gain=32**(设备会持久化残留, 不锁会被污染致深度归零)。
 - **`sample/sample_v1/CMakeLists.txt`**:`ALL_SAMPLES` 列表追加 `SimpleView_CaptureDump`(被 foreach 自动编译)。
 
 ## 关键文件
@@ -74,11 +79,11 @@ python3 tools/view_cloud.py data/fm815_114/                  # 多帧点云翻�
 
 ## FAQ
 
-- **为什么只有一张图,不是左右两个摄像头?** 结构光≠双目。深度由「投射器 + 相机」这对基线**主动**
-  打图案三角测量得出,不是两个可见光相机被动匹配视差。SDK 把内部解算**融合成一路 DEPTH 输出**,
-  不给原始左右红外帧。故每帧只有:一张 `depth`(3D 结果)、一张 `color`(独立 RGB 纹理相机,仅上色)、
-  一个 `points`(由 depth 经内参反投影)。**数据完整,非漏采。** 要看原始红外图案需另开
-  `TY_COMPONENT_IR_CAM`(默认未开)。
+- **三个镜头是什么?是双目结构光吗?** 是。本设备经 `DumpAllFeatures` 实测 = **主动双目结构光**:
+  1 个 IR 散斑投射器 + 左右 2 个 IR 相机(做 SGBM 立体匹配)+ 1 个 RGB(仅上色)。深度由左右 IR 的视差算出,
+  SDK 把解算融合成一路 DEPTH 输出(不给原始左右 IR 帧;要看得 `-ir` 开 `TY_COMPONENT_IR_CAM`)。
+  成像原理、深度计算、全部佐证见 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md)。
+  (早先「结构光≠双目」的说法不准确,已据此更正。)
 - 深度图全黑:正常,见上「深度图看起来很黑」。
 - 用 Camport4(V4 API),**不是** VcameraSDK(已删)、也不是老 Camport3。
 - 找不到设备:确认 `.114` 与采集机同子网、GigE Vision 广播可达(跑 `ListDevices` 验证)。

@@ -66,12 +66,27 @@ static void write_pcd(const TY_VECT_3F* pnts, const uint8_t* bgr, size_t n, cons
 static void handle_frame(TY_FRAME_DATA* frame, const CbCalib& cb, const std::string& outdir, int idx) {
     TY_IMAGE_DATA* depthImg = nullptr;
     TY_IMAGE_DATA* colorImg = nullptr;
+    TY_IMAGE_DATA* irLeftImg = nullptr;
+    TY_IMAGE_DATA* irRightImg = nullptr;
     for (int i = 0; i < frame->validCount; ++i) {
         if (frame->image[i].status != TY_STATUS_OK) continue;
         if (frame->image[i].componentID == TY_COMPONENT_DEPTH_CAM) depthImg = &frame->image[i];
         else if (frame->image[i].componentID == TY_COMPONENT_RGB_CAM) colorImg = &frame->image[i];
+        else if (frame->image[i].componentID == TY_COMPONENT_IR_CAM_LEFT) irLeftImg = &frame->image[i];
+        else if (frame->image[i].componentID == TY_COMPONENT_IR_CAM_RIGHT) irRightImg = &frame->image[i];
     }
     if (!depthImg) { LOGW("frame %d: no depth, skip", idx); return; }
+
+    // ---- IR(诊断用): 左右原始 mono8 帧, 看散斑清晰度/曝光是否过暗过曝 ----
+    auto dump_ir = [&](const char* tag, TY_IMAGE_DATA* im) {
+        if (!im) return;
+        cv::Mat m(im->height, im->width, CV_8U, im->buffer);
+        char ipath[512];
+        snprintf(ipath, sizeof(ipath), "%s/ir_%s_%04d.png", outdir.c_str(), tag, idx);
+        cv::imwrite(ipath, m);
+    };
+    dump_ir("left", irLeftImg);
+    dump_ir("right", irRightImg);
 
     const int dw = depthImg->width, dh = depthImg->height;
     char path[512];
@@ -145,6 +160,12 @@ int main(int argc, char* argv[]) {
     int N = 10;
     bool with_color = true;
     bool align = true;
+    bool dump_ir = false;
+    int ire = 0;   // IR exposure time override (0 = 不改)
+    int irg = 32;  // IR gain(默认 32=出厂最优; 设备会持久化, 故每次显式锁定)
+    int depth_idx = 0;   // depth 模式索引: 0=640x480 1=1280x960 2=320x240
+    int uniq = -1;       // SGBM uniqueness factor(-1 不改; 越小越宽松=更密但更噪)
+    bool nolrc = false;  // 关 SGBM 左右一致性检查(更密, 有假阳性)
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "-ip")) IP = argv[++i];
         else if (!strcmp(argv[i], "-id")) ID = argv[++i];
@@ -152,8 +173,14 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(argv[i], "-outdir")) outdir = argv[++i];
         else if (!strcmp(argv[i], "-color=off")) with_color = false;
         else if (!strcmp(argv[i], "-noalign")) align = false;
+        else if (!strcmp(argv[i], "-ir")) dump_ir = true;
+        else if (!strcmp(argv[i], "-ire")) ire = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-irg")) irg = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-dmode")) { int w=atoi(argv[++i]); depth_idx = (w>=1280?1:(w<=320?2:0)); }
+        else if (!strcmp(argv[i], "-uniq")) uniq = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-nolrc")) nolrc = true;
         else if (!strcmp(argv[i], "-h")) {
-            LOGI("Usage: %s -ip <IP> [-n frames] [-outdir dir] [-color=off] [-noalign]", argv[0]);
+            LOGI("Usage: %s -ip <IP> [-n frames] [-outdir dir] [-color=off] [-noalign] [-ir] [-ire us] [-irg gain]", argv[0]);
             return 0;
         }
     }
@@ -181,10 +208,19 @@ int main(int argc, char* argv[]) {
     // depth
     if (allComps & TY_COMPONENT_DEPTH_CAM) {
         TY_IMAGE_MODE mode;
-        ASSERT_OK(get_default_image_mode(hDevice, TY_COMPONENT_DEPTH_CAM, mode));
+        ASSERT_OK(get_image_mode(hDevice, TY_COMPONENT_DEPTH_CAM, mode, depth_idx));  // 0=640 1=1280 2=320
         LOGI("depth mode %dx%d", TYImageWidth(mode), TYImageHeight(mode));
         ASSERT_OK(TYSetEnum(hDevice, TY_COMPONENT_DEPTH_CAM, TY_ENUM_IMAGE_MODE, mode));
         ASSERT_OK(TYEnableComponents(hDevice, TY_COMPONENT_DEPTH_CAM));
+        // 可选: 放宽 SGBM 严苛度换密度(uniqueness 调低 / 关 LRC)。代价是噪声/假匹配增加。
+        if (uniq >= 0) {
+            TYSetInt(hDevice, TY_COMPONENT_DEPTH_CAM, TY_INT_SGBM_UNIQUE_FACTOR, (int32_t)uniq);
+            LOGI("SGBM uniqueness -> %d", uniq);
+        }
+        if (nolrc) {
+            TYSetBool(hDevice, TY_COMPONENT_DEPTH_CAM, TY_BOOL_SGBM_LRC, false);
+            LOGI("SGBM LRC off");
+        }
         bool hasScale = false;
         TYHasFeature(hDevice, TY_COMPONENT_DEPTH_CAM, TY_FLOAT_SCALE_UNIT, &hasScale);
         if (hasScale) TYGetFloat(hDevice, TY_COMPONENT_DEPTH_CAM, TY_FLOAT_SCALE_UNIT, &cb.depth_scale);
@@ -198,6 +234,30 @@ int main(int argc, char* argv[]) {
         TYHasFeature(hDevice, TY_COMPONENT_RGB_CAM, TY_STRUCT_CAM_CALIB_DATA, &hasCalib);
         if (hasCalib) TYGetStruct(hDevice, TY_COMPONENT_RGB_CAM, TY_STRUCT_CAM_CALIB_DATA, &cb.color_calib, sizeof(cb.color_calib));
         cb.has_color = true;
+    }
+
+    // IR: 若 -ir 则同时开左右 IR 相机输出 mono8 原始帧(看散斑/曝光)。
+    //     无论是否 -ir, 都把增益显式锁定到 irg(默认 32=出厂最优)——
+    //     Percipio 设置会持久化, 不锁的话会被上次残留值(可能很高)污染, 导致深度归零。
+    {
+        TY_COMPONENT_ID irs[2] = {TY_COMPONENT_IR_CAM_LEFT, TY_COMPONENT_IR_CAM_RIGHT};
+        for (auto c : irs) {
+            if (!(allComps & c)) continue;
+            if (dump_ir) {
+                TY_IMAGE_MODE m;
+                if (get_default_image_mode(hDevice, c, m) == TY_STATUS_OK) {
+                    TYSetEnum(hDevice, c, TY_ENUM_IMAGE_MODE, m);   // IR 模式只读, 失败无碍
+                }
+                TYEnableComponents(hDevice, c);
+                TY_INT_RANGE r; TYGetIntRange(hDevice, c, TY_INT_EXPOSURE_TIME, &r);
+                int32_t v = 0; TYGetInt(hDevice, c, TY_INT_EXPOSURE_TIME, &v);
+                LOGI("IR comp=0x%x exposure now=%d range=[%d,%d]", c, v, r.min, r.max);
+                if (ire > 0) TYSetInt(hDevice, c, TY_INT_EXPOSURE_TIME, (int32_t)ire);
+            }
+            TYSetInt(hDevice, c, TY_INT_GAIN, (int32_t)irg);   // 每次锁定增益
+            int32_t gv = 0; TYGetInt(hDevice, c, TY_INT_GAIN, &gv);
+            LOGI("IR comp=0x%x gain -> %d", c, gv);
+        }
     }
 
     uint32_t frameSize; ASSERT_OK(TYGetFrameBufferSize(hDevice, &frameSize));
