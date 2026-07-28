@@ -57,7 +57,7 @@ LD_LIBRARY_PATH=third_party/camport4/lib/linux/lib_x64 \
 
 每帧四件(同编号):
 - `depth_%04d.png` — uint16,**单位 mm**(有效值约 558–4164mm, 见上工作量程);
-- `color_%04d.jpg` — 原分辨率 BGR(RGB 相机原始可见光, 仅上色, 不参与测距);
+- `color_%04d.jpg` — 原分辨率 BGR,**已去 RGB 镜头畸变**(`TYUndistortImage`,见§9);RGB 仅上色,不参与测距;
 - `points_%04d.pcd` — ASCII,`FIELDS x y z r g b`,**单位米**;
 - `points_%04d.ply` — **binary**,`float xyz + uchar rgb`,**单位米**,与同帧 PCD 同源(点数/坐标/颜色逐点一致)。
   **CloudCompare 看点云用它**:本机 CloudCompare(2.11 apt)未带 PCL/PDAL,不认 `.pcd`(`unhandled extension`),
@@ -90,6 +90,9 @@ python3 tools/view_cloud.py data/fm815_114/                  # 多帧点云翻�
   功率/频闪;破案见 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md) §8)/ **`-nodepth`**(纯 IR 拍真散斑)/
   `-irflash`(IR 泛光灯, 本设备无)。每帧统计深度有效率(对比 LASER 开关的判据)。每次启动**锁定 IR gain=32**、
   打印 `LASER now: power=X auto=Y`(设备会持久化残留, 不锁会被污染致深度归零)。
+  **RGB 去畸变**:解码 BGR 后、存 JPG 与贴点云前,用 `TYUndistortImage(&color_calib,…)` 去镜头桶形畸变
+  (设备出厂 12 系数模型;不用 OpenCV),贴图时 `color_calib` 畸变清零避免二次校正。修复点云里直线(凹槽)
+  随颜色弯曲的问题(几何本身无畸变),详 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md) §9。
 - **`sample/sample_v1/CMakeLists.txt`**:`ALL_SAMPLES` 列表追加 `SimpleView_CaptureDump`(被 foreach 自动编译)。
 
 ## 关键文件
@@ -110,6 +113,10 @@ python3 tools/view_cloud.py data/fm815_114/                  # 多帧点云翻�
   从 33% 跌到 2%,是深度命脉)。IR 帧全黑**不是故障**:`-ir` 和 depth 同开时,激光同步绑给了 depth,
   IR 组件取到灭灯相位的暗电平读出(max≈14,gain 也无效)。**要拍真散斑得 IR-only 模式**(`-nodepth`
   只开 IR,投射器转而同步给 IR 流 → IR 帧全亮)。完整排障记录见 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md) §8。
+- **带色点云里直线(墙凹槽)为什么是弯的?** 弯的是**颜色**,不是几何:RGB 是独立镜头,自带桶形畸变,
+  贴到干净几何上,凹槽(靠颜色才看得见)就跟着弯(CloudCompare 关掉 RGB 颜色即变直 = 证据)。`main.cpp`
+  已在贴图前用 `TYUndistortImage`(设备出厂 RGB 畸变系数,Percipio 12 系数模型)**自动去畸变**,
+  故 `color_*.jpg` 和点云颜色都是直的。测量若要绝对保险,直接用不带色的几何点云。详 [STRUCTURED_LIGHT.md](STRUCTURED_LIGHT.md) §9。
 - 深度图全黑:正常,见上「深度图看起来很黑」。
 - 用 Camport4(V4 API),**不是** VcameraSDK(已删)、也不是老 Camport3。
 - 找不到设备:确认 `.114` 与采集机同子网、GigE Vision 广播可达(跑 `ListDevices` 验证)。

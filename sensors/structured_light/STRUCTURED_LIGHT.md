@@ -258,6 +258,67 @@ SimpleView_CaptureDump -ip 192.168.1.114 -n 2 -nodepth -color=off -laser 100 -ir
 
 ---
 
+## 9. RGB 彩色镜头畸变(点云里直线弯曲的成因与修复)
+
+带色点云里墙上**直线(凹槽)看着是弯的**,且弯曲和彩色图里一模一样。本节记录诊断与修复全过程。
+
+### 9.1 两个会误导的度量(先排雷)
+- **点到平面平整度(§5 的 1.4mm)**:量的是**离面 z 残差**,看不出**平面内**的桶形畸变——桶形是把直线
+  在平面内掰弯,z 几乎不变,故平整度指标对它完全失明。
+- **针孔拟合残差**:点云本就用 `X=(u-cx)·Z/fx` 生成,拿这公式反拟合当然残差 0,**循环论证,
+  证明不了有没有畸变**。
+
+**正确判据 = 直线特征**:用墙上已知是直的凹槽,看它在点云里直不直(镜头畸变的经典检测法)。
+
+### 9.2 诊断:弯的是颜色,不是几何
+- **CloudCompare 决定性验证**:把点云 RGB 颜色关掉、改按高度上色 → **凹槽立刻变直**。
+  → 几何没畸变,弯的只是颜色。
+- **几何为什么干净**:双目深度在 **rectify(校正)后**的图上算,IR 镜头畸变在校正阶段已消除;
+  depth 图存的是轴向 z(实测 `|depth − 点云.z| = 0.00 mm`,完全相等),点云是干净针孔,直线不弯。
+- **颜色为什么弯**:RGB 是**独立镜头**,自带桶形畸变;解码出的 BGR 带着它,贴到干净几何上,
+  凹槽(靠颜色才看得见)就跟着 RGB 弯。图像和点云弯曲**一模一样** = 同一份 RGB 镜头畸变
+  (若弯的是几何/IR,图案会和 RGB 镜头不同)。
+
+### 9.3 RGB 畸变系数怎么来(读出厂标定,无需自标定)
+```c
+TY_CAMERA_CALIB_INFO color_calib;
+TYGetStruct(hDevice, TY_COMPONENT_RGB_CAM, TY_STRUCT_CAM_CALIB_DATA, &color_calib, sizeof(color_calib));
+```
+`TY_CAMERA_CALIB_INFO` 含两块:
+- `intrinsic.data[9]` = 3×3 矩阵 `[fx,0,cx, 0,fy,cy, 0,0,1]`。本机 RGB 实测:**fx=1864.8 fy=1865.3 cx=1278.9 cy=955.2**。
+- `distortion.data[12]` = **Percipio 自定义 12 系数畸变模型**(不是 OpenCV 的 5/8 系数)。本机前 6 项实测:
+  **`-0.2334, 0.4031, -0.0002, 0.0004, 0.2073, 0.0268`**(首项 k1=−0.2334 <0 → 桶形畸变)。
+
+`main.cpp` 启动时打印这组系数(`color_calib intrinsic ... distortion[0..5] ...`)供核查。
+
+### 9.4 去畸变怎么做(用 SDK 自带接口,别用 OpenCV)
+用 `TYUndistortImage`(`TYImageProc.h`)——它懂 Percipio 的 12 系数模型;OpenCV 的 `cv::undistort`
+是 5/8 系数,模型不匹配,**不要用**。
+
+```c
+// 1) 解码出 BGR8 后, 用 color_calib 去镜头畸变(NULL 新内参 = 保持原 fx/fy/cx/cy, 输出 pinhole 图)
+TY_IMAGE_DATA simg{/*BGR8, colorBGR*/}, dimg{/*BGR8, ud 缓冲*/};
+TYUndistortImage(&color_calib, &simg, NULL, &dimg, TY_LENS_PINHOLE);   // OK 后用 ud 替换 colorBGR
+
+// 2) 贴点云时, 传给 TYMapRGBImageToDepthCoordinate 的 color_calib 把畸变清零
+//    (图已是 pinhole, 不清零会被映射函数再校一次 = 二次校正, 把颜色又挪歪)
+TY_CAMERA_CALIB_INFO calib_pin = color_calib;
+memset(&calib_pin.distortion, 0, sizeof(calib_pin.distortion));
+TYMapRGBImageToDepthCoordinate(&depth_calib, dw, dh, depth, &calib_pin, cw, ch, colorBGR, mappedColor, scale);
+```
+
+要点:
+- **只去 RGB**。depth/IR 几何已 rectify,不要再动;`TY_BOOL_UNDISTORTION` 只在 IR 组件上有,RGB 没有。
+- 去畸变后图是 pinhole,**贴图用的 calib 必须清零畸变**,否则二次校正。
+- 去畸变在**存 JPG 之前**做 → 存盘的 `color_*.jpg` 也一并去畸变了(修复前那张带桶形弯)。
+- 支持 `TYUndistortImage` 的格式:Mono8/Mono16/RGB8/BGR8/Coord3D_C16;解码出的 BGR8 正好适用。
+
+### 9.5 验证
+同一面墙、同一组凹槽:修复前带色点云凹槽弯曲;修复后(本节去畸变)凹槽变直;几何(关 RGB)始终是直的。
+深度有效率不受影响(90.2%)。
+
+---
+
 ## 附:与 LiDAR 的根本区别
 
 LiDAR(禾赛/速腾/Livox)靠**飞行时间**(ToF,直接测光往返)得距离,每点独立、稀疏但远(百米级)。

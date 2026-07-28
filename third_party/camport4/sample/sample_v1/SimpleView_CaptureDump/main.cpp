@@ -34,6 +34,7 @@
 #include <vector>
 #include <string>
 #include <cstdio>
+#include <cstring>
 
 struct CbCalib {
     TY_CAMERA_CALIB_INFO depth_calib;
@@ -157,7 +158,7 @@ static int handle_frame(TY_FRAME_DATA* frame, const CbCalib& cb, const std::stri
         cv::imwrite(path, dm);
     }
 
-    // ---- color: 解码成 BGR8 存 jpg ----
+    // ---- color: 解码成 BGR8, 去镜头畸变(TYUndistortImage), 存 jpg ----
     std::vector<uint8_t> colorBGR;
     int cw = 0, ch = 0;
     if (cb.has_color && colorImg) {
@@ -174,6 +175,19 @@ static int handle_frame(TY_FRAME_DATA* frame, const CbCalib& cb, const std::stri
             cw = colorImg->width; ch = colorImg->height;
             colorBGR.assign((uint8_t*)colorImg->buffer, (uint8_t*)colorImg->buffer + colorImg->size);
         }
+        // 去镜头畸变: RGB 是独立镜头带桶形畸变, 不修的话颜色贴到点云上, 墙上直线(凹槽)会跟着弯
+        // (实测: 点云关掉 RGB 颜色后凹槽是直的 → 几何无畸变, 弯的只是颜色)。用 SDK 的 TYUndistortImage
+        // (Percipio 自定义 12 系数模型, 套 OpenCV 不对)。去畸变后图变成 pinhole, 后续贴图用清零畸变的 calib。
+        if (!colorBGR.empty() && cw > 0 && ch > 0) {
+            TY_IMAGE_DATA simg{}; simg.width = cw; simg.height = ch;
+            simg.pixelFormat = TYPixelFormatBGR8; simg.size = (uint32_t)colorBGR.size(); simg.buffer = colorBGR.data();
+            std::vector<uint8_t> ud(colorBGR.size());
+            TY_IMAGE_DATA dimg{}; dimg.width = cw; dimg.height = ch;
+            dimg.pixelFormat = TYPixelFormatBGR8; dimg.size = (uint32_t)ud.size(); dimg.buffer = ud.data();
+            int ue = TYUndistortImage(&cb.color_calib, &simg, nullptr, &dimg, TY_LENS_PINHOLE);
+            if (ue == TY_STATUS_OK) colorBGR.swap(ud);
+            else LOGW("frame %d: color undistort err=%d (distortion 全 0? 跳过去畸变)", idx, ue);
+        }
         if (!colorBGR.empty()) {
             cv::Mat cm(ch, cw, CV_8UC3, colorBGR.data());
             snprintf(path, sizeof(path), "%s/color_%04d.jpg", outdir.c_str(), idx);
@@ -186,9 +200,13 @@ static int handle_frame(TY_FRAME_DATA* frame, const CbCalib& cb, const std::stri
     const uint8_t* color_for_pc = nullptr;
     if (cb.align && cb.has_color && !colorBGR.empty()) {
         mappedColor.assign((size_t)dw * dh * 3, 0);
+        // 颜色已在上方去畸变成 pinhole 图; 这里把 color_calib 的畸变系数清零再传,
+        // 否则 TYMapRGBImageToDepthCoordinate 会再做一次畸变校正(二次校正把颜色挪歪)。
+        TY_CAMERA_CALIB_INFO color_calib_pin = cb.color_calib;
+        memset(&color_calib_pin.distortion, 0, sizeof(color_calib_pin.distortion));
         int err = TYMapRGBImageToDepthCoordinate(
             &cb.depth_calib, dw, dh, depth.data(),
-            &cb.color_calib, cw, ch, colorBGR.data(),
+            &color_calib_pin, cw, ch, colorBGR.data(),
             mappedColor.data(), cb.depth_scale);
         if (err == TY_STATUS_OK) color_for_pc = mappedColor.data();
         else LOGW("frame %d: TYMapRGBImageToDepthCoordinate err=%d, point cloud will be colorless", idx, err);
@@ -348,7 +366,15 @@ int main(int argc, char* argv[]) {
         ASSERT_OK(TYEnableComponents(hDevice, TY_COMPONENT_RGB_CAM));
         bool hasCalib = false;
         TYHasFeature(hDevice, TY_COMPONENT_RGB_CAM, TY_STRUCT_CAM_CALIB_DATA, &hasCalib);
-        if (hasCalib) TYGetStruct(hDevice, TY_COMPONENT_RGB_CAM, TY_STRUCT_CAM_CALIB_DATA, &cb.color_calib, sizeof(cb.color_calib));
+        if (hasCalib) {
+            TYGetStruct(hDevice, TY_COMPONENT_RGB_CAM, TY_STRUCT_CAM_CALIB_DATA, &cb.color_calib, sizeof(cb.color_calib));
+            // 打印 RGB 畸变系数: 用于 TYUndistortImage 去镜头畸变(不修则颜色贴到点云上直线会弯)。
+            const float* d = cb.color_calib.distortion.data;
+            LOGI("color_calib intrinsic fx=%.1f fy=%.1f cx=%.1f cy=%.1f  distortion[0..5]=%.4f %.4f %.4f %.4f %.4f %.4f",
+                 cb.color_calib.intrinsic.data[0], cb.color_calib.intrinsic.data[4],
+                 cb.color_calib.intrinsic.data[2], cb.color_calib.intrinsic.data[5],
+                 d[0], d[1], d[2], d[3], d[4], d[5]);
+        }
         cb.has_color = true;
     }
 

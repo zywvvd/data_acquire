@@ -41,6 +41,11 @@
     `-irflash`(IR 泛光灯,本设备 `TYHasFeature=false` 即无此件)。每帧末尾打深度有效率、整批打平均有效率
     (LASER 开关的客观判据)。启动时读+打 `LASER now: power=X auto=Y` 并锁定 IR gain=32(设置持久化,
     不锁会被残留污染致深度归零)。投射器/IR 排障全记录见 `sensors/structured_light/STRUCTURED_LIGHT.md` §8。
+  - **RGB 去镜头畸变**:`TYGetStruct(...TY_STRUCT_CAM_CALIB_DATA...)` 读 RGB 出厂标定(intrinsic 3×3 +
+    distortion 12 系数 Percipio 自定义模型,本机 k1=−0.2334 桶形);解码 BGR 后用 `TYUndistortImage`
+    去畸变(不用 OpenCV,模型不匹配),再存 JPG / 贴点云;贴图时 `color_calib` 畸变清零避免二次校正。
+    修复「带色点云直线(凹槽)随颜色弯曲」(几何本身无畸变,双目深度已 rectify)。启动打印 `color_calib
+    intrinsic...distortion[0..5]...` 供核查。详 `sensors/structured_light/STRUCTURED_LIGHT.md` §9。
 - **重新获取**:
   ```bash
   git clone https://github.com/percipioxyz/camport4.git

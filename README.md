@@ -161,7 +161,7 @@ data/
 | HesaiLidar_SDK_2.0 | .201 | `build/sample_pcd` | +`test/test_pcd.cc`(回调直写 ASCII PCD 绕 PCL)+ CMakeLists |
 | rslidar_sdk v1.5.20 | .202/.205 | `src/rs_driver/build_rs/tool/rs_driver_pcdsaver` | 无源码改(仅 cmake flag `-include memory`, 只编 rs_driver 免 ROS) |
 | Livox-SDK2 | .100 | `build/samples/livox_lidar_pcd_saver/...` | +`livox_lidar_pcd_saver/`(回调按 50000 点切帧写 PCD)+ CMakeLists |
-| camport4 R4.2.11 | .114 | `sample/build/bin/SimpleView_CaptureDump` | +`SimpleView_CaptureDump/main.cpp`(无头采集: depth+color+点云PCD+PLY, 两遍法写, PLY与PCD同源兜底CloudCompare; +LASER 控制 `-laser/-lauto` + IR-only `-nodepth` 拍真散斑 + 深度有效率统计)+ CMakeLists |
+| camport4 R4.2.11 | .114 | `sample/build/bin/SimpleView_CaptureDump` | +`SimpleView_CaptureDump/main.cpp`(无头采集: depth+color+点云PCD+PLY, 两遍法写, PLY与PCD同源兜底CloudCompare; +LASER 控制 `-laser/-lauto` + IR-only `-nodepth` 拍真散斑 + 深度有效率统计; +RGB `TYUndistortImage` 去镜头畸变修点云颜色弯曲)+ CMakeLists |
 
 关键编译命令见各设备 README 与 SOURCES.md。
 
