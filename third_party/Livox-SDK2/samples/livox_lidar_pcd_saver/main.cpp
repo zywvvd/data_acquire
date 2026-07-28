@@ -1,8 +1,24 @@
-// Livox(.100 HAP) 点云存盘 demo —— 仿 livox_lidar_quick_start, 把点云回调改为按帧(frame_cnt)
-// 累积 CartesianHigh(int32 xyz mm + reflectivity) 点, 落 ASCII PCD。其余 init / Normal 模式逻辑照搬。
+// Livox(.100 HAP) 点云存盘 demo —— 仿 livox_lidar_quick_start, 把点云回调改为按帧累积
+// CartesianHigh(int32 xyz mm + reflectivity) 点, 落 ASCII PCD。其余 init / Normal 模式逻辑照搬。
 //
 // 用法: livox_lidar_pcd_saver <config.json>
 //   环境变量: PCD_OUT=输出目录(默认 pcd_livox, 需预先创建); LIVOX_RUN_SECS=运行秒数(默认 15)。
+//
+// ── SDK 本质工作原理(与禾赛/速腾的关键差异: 主动查询式)──
+// 传输: UDP, 但属「主动查询式」: SDK 先广播发现查询、雷达应答, 雷达不会主动推流。
+//   故静态嗅探(tcpdump)看不到流量属正常 —— 必须跑 SDK 才有数据。
+// 模型: 主动发现 + 回调。SDK 发现雷达后, 在 LidarInfoChangeCallback 里把它置为 Normal(开始推点云),
+//   之后点数据经 PointCloudCallback 回调流入。
+// 编码: 主机端。原始点 LivoxLidarCartesianHighRawPoint 是 int32 xyz(mm), 回调里 /1000 转米。
+// 帧边界: HAP 的 frame_cnt 实测恒 0(不随旋转递增), 无法用它分帧 —— 改按累积点数每 50000 点切一帧(~10Hz)。
+//
+// ── SDK 调用流程 ──
+//   1. LivoxLidarSdkInit(json)                    初始化(读 config.json: 端口/host_ip/广播域)
+//   2. SetLivoxLidarPointCloudCallBack            注册点云回调(累积 + 落盘在此)
+//   3. SetLivoxLidarInfoChangeCallback            注册发现回调(发现即置 Normal)
+//   4. [SDK: 广播查询 → 雷达应答 → LidarInfoChangeCallback → SetNormal → 点云流入]
+//   5. sleep(LIVOX_RUN_SECS)                      主线程等待(限时自停)
+//   6. FlushFrame + LivoxLidarSdkUninit           落最后一帧 + 释放
 
 #include "livox_lidar_def.h"
 #include "livox_lidar_api.h"
@@ -88,16 +104,16 @@ int main(int argc, const char* argv[]) {
   int run_secs = 15;
   if (const char* s = getenv("LIVOX_RUN_SECS")) run_secs = atoi(s);
 
-  if (!LivoxLidarSdkInit(argv[1])) {
+  if (!LivoxLidarSdkInit(argv[1])) {            // 1. 初始化(读 config.json: cmd/point 端口、host_ip、广播域)
     printf("Livox Init Failed\n");
     LivoxLidarSdkUninit();
     return -1;
   }
-  SetLivoxLidarPointCloudCallBack(PointCloudCallback, nullptr);
-  SetLivoxLidarInfoChangeCallback(LidarInfoChangeCallback, nullptr);
+  SetLivoxLidarPointCloudCallBack(PointCloudCallback, nullptr);      // 2. 点云回调 —— 累积 mm→m + 落盘入口
+  SetLivoxLidarInfoChangeCallback(LidarInfoChangeCallback, nullptr); // 3. 发现回调 —— 发现即 SetNormal, 之后点云才流入
 
   printf("livox_lidar_pcd_saver: out=%s run=%ds\n", g_outdir.c_str(), run_secs);
-  for (int i = 0; i < run_secs; ++i) sleep(1);
+  for (int i = 0; i < run_secs; ++i) sleep(1);  // 5. 主线程等待(限时自停; 4 的收数在 SDK 线程)
 
   FlushFrame();  // 落最后一帧
   LivoxLidarSdkUninit();

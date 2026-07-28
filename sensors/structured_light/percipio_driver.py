@@ -5,6 +5,18 @@
 跑 camport4 自编的 SimpleView_CaptureDump(无头, 不依赖 GUI/OpenGL): 每帧落
 depth(16bit PNG, mm) + color(JPG) + 点云(ASCII PCD, 米, rgb)。采完 N 帧子进程自停 → 批量型:
 基类 grab() 首次调用时同步 run 完, 之后逐帧返回 points_%04d.pcd(同帧 depth/color 同编号)。
+
+底层 SDK 调用流程(Python 如何封装):
+  SubprocessSensor(子进程型, 批量): _duration() 返回 None → 基类 grab() 首次调用时 subprocess.run
+  同步跑完 SimpleView_CaptureDump 取 N 帧, 之后逐帧返回 points_%04d.pcd。Camport4(TYApi V4)是 GigE
+  Vision 同步拉取(非回调), 其内部链路(见 SimpleView_CaptureDump/main.cpp):
+    TYInitLib → selectDevice(GigE, IP) → TYDisableComponents(all) + 选择性 Enable(DEPTH_CAM/RGB_CAM)
+    +读内参 → 入队 2 个帧缓冲(乒乓) → TYStartCapture → 循环 N: TYFetchFrame(阻塞拉一帧)
+    → 落 depth(设备端 uint16 mm)/ color(主机解码 BGR)/ points(主机端 TYMapDepthImageToPoint3d
+    用深度内参反投影成 3D 点, /1000 转米) → 缓冲回笼 → Stop/Close/Deinit。
+  Python 侧只做编排: _build_cmd 拼 -ip/-n/-outdir(-noalign 可选); _env 注入 LD_LIBRARY_PATH;
+  同帧 depth_xxxx.png / color_xxxx.jpg / points_xxxx.pcd 同编号, 以 points 为帧索引。
+  关键: 深度是设备端原始输出, 点云是主机端算的; 只开 DEPTH+RGB, 不开 IR(见 README「深度图很黑」段)。
 """
 import os
 import sys

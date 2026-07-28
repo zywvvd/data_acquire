@@ -8,6 +8,18 @@ SDK **主动查询式**发现雷达、置 Normal(故静态嗅探看不到流量�
 
 按 spec.model 选配置模板: HAP → hap_host200.json; Mid-360 → mid360_host200.json;
 并把 host_net_info.host_ip 渲染成采集机 IP(spec.host_ip, 换采集机时随 spec 生效)。
+
+底层 SDK 调用流程(Python 如何封装):
+  SubprocessSensor(子进程型, 限时自停): Popen 拉起 livox_lidar_pcd_saver。SDK2 属「主动查询式」
+  (与禾赛/速腾的被动推流相反), 其内部链路(见 livox_lidar_pcd_saver/main.cpp):
+    LivoxLidarSdkInit(json) → SetLivoxLidarPointCloudCallBack + SetLivoxLidarInfoChangeCallback
+    → [SDK 广播发现 → 雷达应答 → LidarInfoChangeCallback 置 Normal(雷达才开始推点)
+    → PointCloudCallback: 取 LivoxLidarCartesianHighRawPoint(int32 xyz mm) /1000 转米,
+    每 50000 点写一帧 %05d.pcd] → sleep(LIVOX_RUN_SECS) → FlushFrame → Uninit。
+  Python 侧只做编排: _cfg_path 按 spec.model 选模板(hap/mid360)并渲染 host_ip 写 device.json;
+  _env 注入 LD_LIBRARY_PATH(动态链)+ PCD_OUT + LIVOX_RUN_SECS(限时自停, 唯一自己退出的设备);
+  grab() 增量扫描新 pcd。
+  关键: HAP frame_cnt 实测恒 0 → 改按点数切帧; 静态嗅探无流量是正常的(必须跑 SDK 才有数据)。
 """
 import json
 import os

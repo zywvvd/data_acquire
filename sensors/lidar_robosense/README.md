@@ -36,8 +36,8 @@ cd third_party/rslidar_sdk-v1.5.20/src/rs_driver && mkdir -p build_rs && cd buil
 cmake -DCOMPILE_DEMOS=ON -DCOMPILE_TOOL_PCDSAVER=ON -DCMAKE_CXX_FLAGS="-include memory" ..
 make rs_driver_pcdsaver -j        # -> tool/rs_driver_pcdsaver
 ```
-- ⚠️ **只编 `src/rs_driver/`**:顶层 `rslidar_sdk_node` 关 ROS 时引用未声明 ROS 符号,编不过。
-- ⚠️ 必须 `-include memory`(GCC11 老代码缺 `<memory>`,见总 README §6)。
+- **只编 `src/rs_driver/`**:顶层 `rslidar_sdk_node` 关 ROS 时引用未声明 ROS 符号,编不过。
+- 必须 `-include memory`(GCC11 老代码缺 `<memory>`,见总 README §6)。
 
 ## 运行
 

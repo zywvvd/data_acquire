@@ -2,14 +2,15 @@
 # -*- coding: utf-8 -*-
 """多帧点云查看器: 逐帧浏览目录里的 ASCII PCD, ←/→ 翻帧、空格播放、q 退出。
 
+依赖 open3d(顺滑, 大点云无压力)。open3d 在 boeye 环境里, 故用该环境跑:
+  /home/vvd/anaconda3/envs/boeye/bin/python tools/view_cloud.py <input>
+
 兼容本仓四种 PCD 字段(按 FIELDS 行自适应):
   · 图漾 Percipio : FIELDS x y z r g b       (rgb 0-255) -> 按原色着色
   · Livox HAP     : FIELDS x y z intensity   (float)
   · 禾赛 QT128    : FIELDS x y z intensity ring
   · 速腾 RSAIRY   : FIELDS x y z intensity [ring]
 有 rgb 按原色; 否则按 intensity 归一化上 jet 色。
-
-后端: 优先 open3d(顺滑, 大点云无压力), 缺失则 fallback matplotlib 3d scatter(点云大时较慢)。
 
 用法:
   python3 tools/view_cloud.py data/fm815_114/                 # 图漾(按帧翻)
@@ -76,8 +77,8 @@ def xyz_rgb(arr, fi):
     return xyz, rgb
 
 
-# ---------------- open3d 后端 ----------------
-def _backend_open3d(files, fps=3):
+def run_viewer(files, fps=3):
+    """open3d 翻帧查看器。"""
     import open3d as o3d
     import time
     idx = [0]; auto = [False]; last = [time.monotonic()]
@@ -96,6 +97,11 @@ def _backend_open3d(files, fps=3):
     vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.create_window("view_cloud   ←/→ 翻帧  空格 播放/暂停  Q 退出", 1024, 768)
     vis.add_geometry(geom)
+
+    # 渲染参数: 暗背景突出点云 + 放大点, 大点云才看得清。
+    opt = vis.get_render_option()
+    opt.background_color = np.array([0.12, 0.12, 0.12])
+    opt.point_size = 3.0
 
     def refresh(v):
         v.update_geometry(geom); v.poll_events(); v.update_renderer()
@@ -118,49 +124,14 @@ def _backend_open3d(files, fps=3):
     vis.register_animation_callback(anim)
 
     show(0)
+    vis.reset_view_point(True)    # 首帧自适应视角(把点云摆正、占满窗口)
     vis.run()
 
 
-# ---------------- matplotlib 后端(fallback) ----------------
-def _backend_matplotlib(files):
-    import matplotlib.pyplot as plt
-    idx = [0]
-    fig = plt.figure(figsize=(9, 7))
-    ax = fig.add_subplot(111, projection="3d")
-
-    def show(i):
-        res = load_pcd(files[i])
-        if not res:
-            return
-        arr, fi = res
-        xyz, rgb = xyz_rgb(arr, fi)
-        ax.clear()
-        ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], c=rgb, s=0.4, marker=".")
-        ax.set_title(f"[{i + 1}/{len(files)}] {os.path.basename(files[i])}  {len(xyz)} pts")
-        ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)"); ax.set_zlabel("z (m)")
-        try:
-            ext = xyz.max(0) - xyz.min(0)
-            ax.set_box_aspect((ext / ext.max()).tolist())
-        except Exception:
-            pass
-        fig.canvas.draw_idle()
-
-    def onkey(event):
-        if event.key == "right":
-            idx[0] = min(idx[0] + 1, len(files) - 1); show(idx[0])
-        elif event.key == "left":
-            idx[0] = max(idx[0] - 1, 0); show(idx[0])
-
-    fig.canvas.mpl_connect("key_press_event", onkey)
-    show(0)
-    plt.show()
-
-
 def main():
-    ap = argparse.ArgumentParser(description="多帧 ASCII PCD 点云查看器")
+    ap = argparse.ArgumentParser(description="多帧 ASCII PCD 点云查看器(open3d)")
     ap.add_argument("input", help="单个 .pcd 或目录")
-    ap.add_argument("--backend", default="auto", choices=["auto", "open3d", "matplotlib"])
-    ap.add_argument("--fps", type=float, default=3.0, help="自动播放帧率(open3d)")
+    ap.add_argument("--fps", type=float, default=3.0, help="自动播放帧率")
     args = ap.parse_args()
 
     if os.path.isdir(args.input):
@@ -170,18 +141,14 @@ def main():
     if not files:
         sys.exit(f"找不到 PCD: {args.input}")
 
-    backend = args.backend
-    if backend == "auto":
-        try:
-            import open3d  # noqa: F401
-            backend = "open3d"
-        except ImportError:
-            backend = "matplotlib"
-    print(f"backend: {backend}  共 {len(files)} 帧")
-    if backend == "open3d":
-        _backend_open3d(files, args.fps)
-    else:
-        _backend_matplotlib(files)
+    try:
+        import open3d  # noqa: F401
+    except ImportError:
+        sys.exit("未安装 open3d。open3d 在 boeye 环境, 请用该 python 运行:\n"
+                 "  /home/vvd/anaconda3/envs/boeye/bin/python tools/view_cloud.py <input>")
+
+    print(f"共 {len(files)} 帧")
+    run_viewer(files, args.fps)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""海康 HCNetSDK 抓图封装（可复用模块）。
+"""海康 HCNetSDK 抓图封装(可复用模块)。进程内 ctypes 直调 libhcnetsdk.so。
 
-在 grab_via_sdk.py 的单张 demo 基础上，把 SDK 加载 / 登录 / 抓图 / 登出 / 清理
-封装成 HikGrabber，支持「登录一次、连拍多张」，供批量采集脚本调用。
+把 SDK 的 加载→初始化→登录→抓图→登出→清理 封装成 HikGrabber,支持「登录一次、
+连拍多张」,供批量采集脚本(record.py / grab_demo.py)复用。对应 Sensor 子类见
+hik_driver.HikSensor。
 
-运行前需让动态链接器找到 SDK 依赖：
+SDK 调用流程(每步对应 HCNetSDK 的一个 C API, 由 ctypes 调用):
+  1. ctypes.CDLL(libhcnetsdk.so)               加载 SDK 动态库
+  2. NET_DVR_SetSDKInitCfg(2/3/4, path)         告知组件库(HCNetSDKCom)与 openssl(libcrypto/libssl)路径
+  3. NET_DVR_Init()                             SDK 初始化
+  4. NET_DVR_SetConnectTime(5000, 3)            连接超时 5s / 重试 3 次
+  5. NET_DVR_Login_V40(USER_LOGIN_INFO) -> uid  登录(byLoginMode=0 走 8000 私有协议), 拿设备句柄 uid
+  --- 以下可反复(连拍) ---
+  6. NET_DVR_CaptureJPEGPicture(uid,ch,JPEGPARA,path)  SDK 在设备端编码一张 JPEG 直接写到 path
+  --- 结束 ---
+  7. NET_DVR_Logout(uid)                        登出
+  8. NET_DVR_Cleanup()                          释放 SDK
+
+特点:同步、进程内、JPEG 由设备端编码(不经主机重编码, 原始画质)。与其它设备「拉起外部
+C++ 进程产文件」的模型不同 —— 这里 Python 直接就是 SDK 的宿主。运行前需让动态链接器找到
+SDK 依赖:
     export LD_LIBRARY_PATH=<sdk>/lib
 """
 import ctypes
@@ -76,13 +91,14 @@ class HikGrabber:
         self._uid = -1
         self._sdk = None
 
-        self._load(lib_dir)
-        self._proto()
-        self._set_sdk_paths()
-        if not self._sdk.NET_DVR_Init():
+        # ---- SDK 启动序列: 构造即完成 加载 → 初始化 → 登录 ----
+        self._load(lib_dir)            # 1. ctypes 加载 libhcnetsdk.so
+        self._proto()                  #    声明各 API 的返回/参数类型(等价 C 函数原型)
+        self._set_sdk_paths()          # 2. NET_DVR_SetSDKInitCfg: 组件库 + openssl 路径
+        if not self._sdk.NET_DVR_Init():                       # 3. NET_DVR_Init
             self._raise_err("NET_DVR_Init 失败")
-        self._sdk.NET_DVR_SetConnectTime(5000, 3)
-        self._login(host, port, user, pwd)
+        self._sdk.NET_DVR_SetConnectTime(5000, 3)              # 4. 连接超时 5s / 重试 3 次
+        self._login(host, port, user, pwd)                     # 5. NET_DVR_Login_V40 -> uid
 
     # ---------- 内部 ----------
     def _load(self, lib_dir):
@@ -134,12 +150,16 @@ class HikGrabber:
 
     # ---------- 对外 ----------
     def capture(self, out_path) -> float:
-        """抓一张 JPEG 到 out_path，返回耗时(ms)。失败抛 RuntimeError。"""
+        """抓一张 JPEG 到 out_path,返回耗时(ms)。失败抛 RuntimeError。
+
+        NET_DVR_CaptureJPEGPicture 让 SDK 在【设备端】编码一张 JPEG 并直接写到 out_path,
+        主机不参与编码 —— 故是原始画质(区别于 RTSP 取流后主机重编码)。可反复调用(连拍)。
+        """
         jpg = _NET_DVR_JPEGPARA()
-        jpg.wPicSize = self._pic_size
-        jpg.wPicQuality = self._pic_quality
+        jpg.wPicSize = self._pic_size        # 0xff = 用当前码流分辨率
+        jpg.wPicQuality = self._pic_quality  # 0 最好 / 1 较好 / 2 一般
         t0 = time.monotonic()
-        ok = self._sdk.NET_DVR_CaptureJPEGPicture(
+        ok = self._sdk.NET_DVR_CaptureJPEGPicture(           # 6. 抓图: (设备句柄, 逻辑通道, 参数, 输出路径)
             self._uid, self._channel, ctypes.byref(jpg), str(out_path).encode())
         dt = (time.monotonic() - t0) * 1000
         if not ok:

@@ -5,6 +5,23 @@
 //        (depth_calib) 得 depth 相机坐标系下的 float3 点; 写 ASCII PCD(FIELDS x y z r g b)。
 // depth 像素 = uint16(mm), 实际距离 = pixel * scale_unit(默认 1mm)。
 //
+// ── SDK 本质工作原理(与 LiDAR 的关键差异: 同步拉取, 非回调)──
+// 传输: GigE Vision(GVCP 控制 + GVSP 流), 经广播发现 —— 标准机器视觉协议, 非厂商私有。
+// 模型: 同步拉取(pull)。经典 GenICam 式: 先入队 N 个缓冲 → StartCapture → 循环
+//   TYFetchFrame(阻塞到下一帧或超时) → 处理 → 缓冲重新入队。无回调线程, 帧由主循环主动「拉」。
+//   这正是它能干净映射到「批量取 N 帧」的原因(本工程唯一批量型设备)。
+// 编码: 深度是设备端原始输出(uint16 mm 结构光); 彩色主机端解码(TYDecodeImage→BGR)。
+//   点云【完全主机端计算】: TYMapDepthImageToPoint3d 用深度相机内参(depth_calib)把每个深度像素反投影成 3D 点。
+//
+// ── SDK 调用流程(每个序号对应一个 TYApi 调用)──
+//   1. TYInitLib                                              初始化库
+//   2. selectDevice(GigE, IP) + TYOpenInterface/TYOpenDevice  发现并打开设备
+//   3. TYDisableComponents(all) + 选择性 Enable(DEPTH_CAM/RGB_CAM)  只开需要的组件 + 读内参
+//   4. TYGetFrameBufferSize + 2× TYEnqueueBuffer              预入队两个帧缓冲(乒乓)
+//   5. TYStartCapture                                         开始取流
+//   6. 循环 N 次: TYFetchFrame → handle_frame → TYEnqueueBuffer  拉一帧/处理/缓冲回笼
+//   7. TYStopCapture / TYCloseDevice / TYCloseInterface / TYDeinitLib
+//
 // 用法: SimpleView_CaptureDump -ip <IP> [-n <帧数>] [-outdir <目录>] [-color=off] [-noalign] [-h]
 //   环境变量 OUTDIR 覆盖输出目录(便于 Python 端注入绝对路径)。
 //
@@ -145,16 +162,16 @@ int main(int argc, char* argv[]) {
     mkdir(outdir.c_str(), 0755);
 
     LOGD("Init lib");
-    ASSERT_OK(TYInitLib());
+    ASSERT_OK(TYInitLib());                          // 1. 初始化库
     TY_VERSION_INFO ver; ASSERT_OK(TYLibVersion(&ver));
     LOGI("libtycam %d.%d.%d", ver.major, ver.minor, ver.patch);
 
     std::vector<TY_DEVICE_BASE_INFO> selected;
-    ASSERT_OK(selectDevice(TY_INTERFACE_ALL, ID, IP, 1, selected));
+    ASSERT_OK(selectDevice(TY_INTERFACE_ALL, ID, IP, 1, selected));  // 2. GigE 广播发现指定 IP
     ASSERT(selected.size() > 0);
     TY_INTERFACE_HANDLE hIface = NULL; TY_DEV_HANDLE hDevice = NULL;
     ASSERT_OK(TYOpenInterface(selected[0].iface.id, &hIface));
-    ASSERT_OK(TYOpenDevice(hIface, selected[0].id, &hDevice));
+    ASSERT_OK(TYOpenDevice(hIface, selected[0].id, &hDevice));       //    打开接口/设备
 
     TY_COMPONENT_ID allComps; ASSERT_OK(TYGetComponentIDs(hDevice, &allComps));
     ASSERT_OK(TYDisableComponents(hDevice, allComps));
@@ -196,16 +213,16 @@ int main(int argc, char* argv[]) {
     }
 
     LOGI("start capture -> %s (%d frames, color=%d align=%d)", outdir.c_str(), N, (int)cb.has_color, (int)align);
-    ASSERT_OK(TYStartCapture(hDevice));
+    ASSERT_OK(TYStartCapture(hDevice));               // 5. 开始取流
 
     int got = 0, tries = 0;
-    while (got < N && tries < N * 4) {
+    while (got < N && tries < N * 4) {                // 6. 拉取循环(批量取 N 帧)
         TY_FRAME_DATA frame;
-        int err = TYFetchFrame(hDevice, &frame, 3000);   // 3s 超时
+        int err = TYFetchFrame(hDevice, &frame, 3000); //    阻塞拉下一帧(3s 超时; 同步 pull, 非回调)
         if (err == TY_STATUS_OK) {
-            handle_frame(&frame, cb, outdir, got);
+            handle_frame(&frame, cb, outdir, got);     //    落 depth/color/pcd
             got++;
-            TYEnqueueBuffer(hDevice, frame.userBuffer, frame.bufferSize);
+            TYEnqueueBuffer(hDevice, frame.userBuffer, frame.bufferSize);  // 缓冲回笼(乒乓)
         } else {
             LOGW("TYFetchFrame err=%d (try %d)", err, tries);
         }
