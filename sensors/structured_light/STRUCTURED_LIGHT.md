@@ -48,6 +48,11 @@
 
 RGB 相机与深度解算无关,只负责给点云上色(`TYMapRGBImageToDepthCoordinate`)。
 
+**接口代际 = Gige_2_0**:`TY_COMPONENT_LASER` 下的 `TY_INT_LASER_POWER` / `TY_BOOL_LASER_AUTO_CTRL`
+均 readable+writable(access=3),走旧 `TYSetInt/TYSetBool` API(**不是** Gige_2_1 的 GenICam
+`LightControllerSelector`/`TYParamGetAccess`)。故 SDK 对 LASER/IR 的设置全部有效,不存在
+「接口代际不匹配致 no-op」。HW 1.3.0 / FW 3.13.70。投射器发射验证、IR 帧为何全黑,详 §8。
+
 ---
 
 ## 3. 深度如何计算(几何推导 + 数值)
@@ -120,10 +125,13 @@ SGBM 只在有限视差窗内搜索匹配(实测 `DISPARITY_OFFSET=25`、`DISPAR
 
 ### (d) IR 增益【默认即最优,勿乱动】
 - IR 曝光上限 990(已封顶)、增益范围 [0,255]、出厂默认 **gain=32**。
-- 实测增益扫描:`gain 32→33.5%`, `64→25.8%`, `128→1.3%`, `200→0%`。**调高增益反而更差**
-  (饱和/噪声破坏匹配纹理)。原始 IR 帧看着暗(max≈14/255)是传感器在曝光上限下的正常表现,
-  仍有足够散斑对比度供匹配——不是故障。
-- **重要:Percipio 的设置会持久化存设备。** 一旦改过增益,会残留影响后续所有采集,必须显式重置回 32。
+- 实测增益扫描(作用对象是**深度有效率**,即机内喂给 SGBM 匹配的那条被照明 IR 路径):
+  `gain 32→33.5%`, `64→25.8%`, `128→1.3%`, `200→0%`。**调高增益反而更差**(饱和/噪声破坏匹配纹理)。
+- `-ir` 直存的 IR 帧(max≈14/255)看着全黑**不是增益/曝光不够**——那是 depth+IR 同开时,
+  激光同步绑给了 depth、IR 组件取到「灭灯相位」的暗电平读出(详 §8.3)。**gain 对这些直存 IR 帧
+  无响应**(无光可放大),但对深度有效率有响应(影响机内另一条被照明的 IR)。要拍真散斑得 IR-only 模式(§8.4)。
+- **重要:Percipio 的设置(LASER_POWER / gain 等)会持久化存设备。** 一旦改过,会残留影响后续所有
+  采集,必须显式重置(gain→32、laser→power100/auto1)。
 
 ### 结构光天性(无法消除)
 玻璃、屏幕、黑色、强反光面打不回有效 IR 散斑 → 永远无效。办公室这类面多,会拉低有效率,属正常。
@@ -174,6 +182,79 @@ SGBM 只在有限视差窗内搜索匹配(实测 `DISPARITY_OFFSET=25`、`DISPAR
 | IR 增益默认 32 最优 | 增益扫描表 | `-ir -irg {32,64,128,200}` 各跑一帧 |
 | 1280×960=4× 点 | 密度矩阵 | `-dmode 1280` 对比默认 |
 | 设置持久化 | 扫描 gain=200 后,裸默认采集归零,查 gain now=200 残留 | `-ir` 打印 `gain now=` |
+| 设备=Gige_2_0,旧 API 有效 | `DumpAllFeatures`: LASER 组件 + LASER_POWER/AUTO_CTRL access=3 | `DumpAllFeatures -ip .114` 看 LASER 段 |
+| 投射器发射=深度命脉 | LASER_POWER 0→深度有效率 2.4%, 100→33% | `-laser 0` vs `-laser 100` 各跑看 valid rate |
+| IR 全黑=co-enable 抢光照 | depth+IR 同开 IR max=14; IR-only(-nodepth) IR mean=199 | `-ir` vs `-nodepth -laser 100 -ire 80` |
+
+---
+
+## 8. 投射器(散斑)与 IR 直取 —— 排障记录
+
+本节回答两个一度被误判的问题:**散斑投射器到底发不发射?** 和 **`-ir` 存的 IR 帧为什么全黑?**
+结论均经对照实验证实,排除了「SDK 太新 / 接口代际不匹配 / 投射器坏了 / IR 相机坏了」等猜测。
+
+### 8.1 设备代际 = Gige_2_0(旧 API 有效)
+
+`DumpAllFeatures` 实测:`TY_COMPONENT_LASER` 存在,`TY_INT_LASER_POWER` / `TY_BOOL_LASER_AUTO_CTRL`
+均 readable+writable(access=3)。→ 本设备是 **Gige_2_0** 接口一代,走旧 `TYSetInt/TYSetBool` API
+(**不是** Gige_2_1 的 GenICam `LightControllerSelector`/`TYParamGetAccess`)。「SDK 太新致 LASER/gain
+设置 no-op」的猜测**不成立**。HW 1.3.0 / FW 3.13.70。
+
+### 8.2 投射器确实发射,且是深度的命脉
+
+散斑投射器是主动双目立体的「人工纹理」来源。对照实验(同一摆位,640×480,各 3 帧平均有效率):
+
+| LASER 配置 | 深度有效率 |
+|---|---|
+| power=100, auto=1(出厂频闪) | **33.4%** |
+| power=100, auto=0(手动常亮) | 33.2% |
+| **power=0(关)** | **2.4%** |
+
+关掉投射器,深度有效率从 33% 暴跌到 2% —— **散斑是立体匹配的纹理来源,关掉几乎匹配不出深度。**
+投射器正常工作。`TYSetInt(TY_COMPONENT_LASER, TY_INT_LASER_POWER, …)` 读回 0↔100 正确、深度随之响应,
+证明旧 API 有效。
+
+> ⚠️ `LASER_POWER` 是**持久化**设置。实验后必须 `-laser 100 -lauto 1` 恢复出厂状态,否则下次裸采集
+> (不传 `-laser`)会用残留 power=0 → 深度归零。`main.cpp` 每次启动会打印 `LASER now: power=X auto=Y` 供核查。
+
+### 8.3 IR 帧全黑的真因:depth+IR co-enable 抢了激光同步
+
+`-ir`(同时开 depth + 左右 IR)存出的 `ir_left/right_*.png` 长期是 max≈14/255 的近全黑帧,
+且 gain 0→255 无响应。**这不是故障,是光照路由**:
+
+投射器的光照只路由给「主」流。depth 与 IR 同时开时,激光频闪**绑给 depth 时序**——深度引擎
+在亮的那一刻内部抓走 IR 图去匹配;而旁路开的 `IR_CAM_LEFT/RIGHT` 组件在**另一时刻**取图 →
+取到「灭灯相位」→ 全黑、无光可放大(gain 无效)。铁证(把四种组合的 IR 帧亮度对比):
+
+| 模式 | 投射器 | IR 帧 mean / max / std |
+|---|---|---|
+| depth + IR 同开(`-ir`) | 开 | 7 / 14 / 5(黑) |
+| depth + IR 同开(`-ir`) | 关 | 7 / 14 / 5(黑) |
+| **IR-only(`-nodepth`)** | 开 | **199 / 255 / 78(亮)** |
+| IR-only(`-nodepth`) | 关 | 19 / 50 / 2(黑) |
+
+IR-only + 投射器开 → IR 帧全亮;Laplacian 纹理方差 **646**(vs 暗帧 105,6×);`analyze_image`
+确认是「高密度随机点散斑,物体边缘在点下可见」。**IR 相机和投射器都正常,只是同开时光照没路由到 IR 组件。**
+
+> §4(d) 早先「IR 帧暗是传感器在曝光上限下的正常表现、仍有散斑对比度供匹配」的说法**不准确,据此更正**:
+> 那些 `-ir` 帧是**未被照明的暗电平读出,不含有效散斑成像**;深度用的是机内另一条被照明的 IR 路径
+> (故深度 33% 与 IR 帧 max=14 并存,不矛盾)。本设备**无独立 IR 泛光灯**
+> (`TY_BOOL_IR_FLASHLIGHT` 在所有组件 `TYHasFeature=false`)。
+
+### 8.4 怎么拿到真散斑图
+
+```bash
+# 正常采集(要 depth/color/点云):不要加 -ir,避免产出无用的暗 IR 帧
+SimpleView_CaptureDump -ip 192.168.1.114 -n 6 -dmode 1280 -outdir <dir>
+
+# 单独拍真散斑(IR-only,牺牲当帧 depth):投射器同步给 IR 流 → IR 帧被照亮
+SimpleView_CaptureDump -ip 192.168.1.114 -n 2 -nodepth -color=off -laser 100 -ire 80 -outdir <dir>
+# → ir_left_*.png / ir_right_*.png 即被照明的散斑图(-ire 80 降曝光,避免散点亮点半过曝)
+```
+
+`main.cpp` 相关开关:`-laser <0..100>`(给值会自动关 auto 进手动常亮)/ `-lauto <0|1>`(投射器
+频闪:1=与采图同步/0=手动常亮)/ `-irflash <0|1>`(IR 泛光灯,本设备无效)/ `-nodepth`(纯 IR,
+拍散斑用)。每帧末尾打深度有效率,整批末尾打平均有效率(对比 LASER 开关的客观判据)。
 
 ---
 

@@ -51,8 +51,9 @@ devices:
     ip: 192.168.1.114
     mac: "06:2d:8c:35:16:31"           # SDK 上报的 device MAC
     transport: gigevision              # GigE Vision, GVCP 广播发现 + GVSP 取流; 无登录凭证
-    enabled: true                      # 已采通: depth(640×480 mm)+color(2560×1920)+点云(~2万点/帧)
-    note: "无凭证; demo: sensors/structured_light/percipio_demo.py"
+    ir: true                           # 同开左右 IR(与 depth 同开=灭灯暗帧 max~14, 非真散斑; 真散斑用二进制 -nodepth 单开, 见 STRUCTURED_LIGHT.md §8)
+    enabled: true                      # 已采通: depth(1280×960 mm)+color(2560×1920)+点云(~40万点/帧, PCD+PLY)+左右IR
+    note: "无凭证; demo: sensors/structured_light/percipio_demo.py [--ir]"
 
   # ---------------- 半固态激光雷达 (Livox HAP) ----------------
   - name: lidar_solid_livox

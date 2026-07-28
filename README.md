@@ -137,7 +137,7 @@ data/
 │   └── align.csv            #   以相机为基准的跨传感器最近邻对齐(无相机则不生成)
 ├── camera_107/  fisheye_99/  hesai_qt128/  robosense_202/  robosense_205/  livox_hap/  fm815_114/
 │                            # 单设备 demo 直存的扁平目录(见 §2)
-└── fm815_114/{depth_*.png(mm), color_*.jpg, points_*.pcd(米+rgb), *_vis.png(深度彩色版)}
+└── fm815_114/{depth_*.png(mm), color_*.jpg, points_*.pcd(米+rgb), points_*.ply(同源binary,CloudCompare用), *_vis.png(深度彩色版)}
 ```
 
 ## 6. 工具链
@@ -161,7 +161,7 @@ data/
 | HesaiLidar_SDK_2.0 | .201 | `build/sample_pcd` | +`test/test_pcd.cc`(回调直写 ASCII PCD 绕 PCL)+ CMakeLists |
 | rslidar_sdk v1.5.20 | .202/.205 | `src/rs_driver/build_rs/tool/rs_driver_pcdsaver` | 无源码改(仅 cmake flag `-include memory`, 只编 rs_driver 免 ROS) |
 | Livox-SDK2 | .100 | `build/samples/livox_lidar_pcd_saver/...` | +`livox_lidar_pcd_saver/`(回调按 50000 点切帧写 PCD)+ CMakeLists |
-| camport4 R4.2.11 | .114 | `sample/build/bin/SimpleView_CaptureDump` | +`SimpleView_CaptureDump/main.cpp`(无头采集: depth+color+点云, 两遍法写 PCD)+ CMakeLists |
+| camport4 R4.2.11 | .114 | `sample/build/bin/SimpleView_CaptureDump` | +`SimpleView_CaptureDump/main.cpp`(无头采集: depth+color+点云PCD+PLY, 两遍法写, PLY与PCD同源兜底CloudCompare; +LASER 控制 `-laser/-lauto` + IR-only `-nodepth` 拍真散斑 + 深度有效率统计)+ CMakeLists |
 
 关键编译命令见各设备 README 与 SOURCES.md。
 

@@ -63,7 +63,42 @@ static void write_pcd(const TY_VECT_3F* pnts, const uint8_t* bgr, size_t n, cons
     fclose(fp);
 }
 
-static void handle_frame(TY_FRAME_DATA* frame, const CbCalib& cb, const std::string& outdir, int idx) {
+// 写 binary little-endian PCL/PLY(vertex: float x y z + uchar red green blue, 单位米, 跳 NaN)。
+// 【与 write_pcd 同源保证一致】同一份 pnts/bgr 输入; 逐点有效判定(!isnan)和颜色转换(BGR->RGB)
+// 完全镜像 write_pcd, 且循环同序 —— 故 PLY 与 PCD 的有效点集、坐标、颜色一一对应、完全等价,
+// 仅编码不同: PCD=ASCII(%.4f), PLY=binary(float32, 精度反高于 PCD)。
+// 起因: 本机 CloudCompare(2.11.3 apt)未带 PCL/PDAL, 不认 .pcd(unhandled extension);
+// PLY 是 CloudCompare/open3d/MeshLab 的核心一等格式(不依赖 PCL), 用它兜底查看。
+static void write_ply(const TY_VECT_3F* pnts, const uint8_t* bgr, size_t n, const char* file) {
+    size_t valid = 0;
+    for (size_t i = 0; i < n; ++i) if (!std::isnan(pnts[i].x)) valid++;   // 同 write_pcd 的判定 → 同一有效点集
+    FILE* fp = fopen(file, "wb");
+    if (!fp) { LOGE("cannot open %s", file); return; }
+    fprintf(fp, "ply\n");
+    fprintf(fp, "format binary_little_endian 1.0\n");
+    fprintf(fp, "comment Percipio point cloud (meters)\n");
+    fprintf(fp, "element vertex %zu\n", valid);
+    fprintf(fp, "property float x\n");
+    fprintf(fp, "property float y\n");
+    fprintf(fp, "property float z\n");
+    fprintf(fp, "property uchar red\n");
+    fprintf(fp, "property uchar green\n");
+    fprintf(fp, "property uchar blue\n");
+    fprintf(fp, "end_header\n");
+    for (size_t i = 0; i < n; ++i) {
+        if (std::isnan(pnts[i].x)) continue;                  // 同序跳过 → 与 PCD 逐点对齐
+        float xyz[3] = { pnts[i].x/1000.f, pnts[i].y/1000.f, pnts[i].z/1000.f };
+        fwrite(xyz, sizeof(float), 3, fp);                     // x86=little-endian, 直写即合格式
+        uint8_t rgb[3];
+        if (bgr) { rgb[0]=bgr[3*i+2]; rgb[1]=bgr[3*i+1]; rgb[2]=bgr[3*i+0]; }  // BGR->RGB, 同 write_pcd
+        else { rgb[0]=rgb[1]=rgb[2]=0; }
+        fwrite(rgb, 1, 3, fp);
+    }
+    fclose(fp);
+}
+
+// 返回该帧有效深度像素数(depth!=0); 供主循环累计深度有效率(对比 LASER 开关的判据)。
+static int handle_frame(TY_FRAME_DATA* frame, const CbCalib& cb, const std::string& outdir, int idx) {
     TY_IMAGE_DATA* depthImg = nullptr;
     TY_IMAGE_DATA* colorImg = nullptr;
     TY_IMAGE_DATA* irLeftImg = nullptr;
@@ -75,18 +110,32 @@ static void handle_frame(TY_FRAME_DATA* frame, const CbCalib& cb, const std::str
         else if (frame->image[i].componentID == TY_COMPONENT_IR_CAM_LEFT) irLeftImg = &frame->image[i];
         else if (frame->image[i].componentID == TY_COMPONENT_IR_CAM_RIGHT) irRightImg = &frame->image[i];
     }
-    if (!depthImg) { LOGW("frame %d: no depth, skip", idx); return; }
-
     // ---- IR(诊断用): 左右原始 mono8 帧, 看散斑清晰度/曝光是否过暗过曝 ----
+    // 放在 depth 必需检查之前: -nodepth 纯 IR 模式(验证投射器是否同步给 IR)也要能 dump IR。
     auto dump_ir = [&](const char* tag, TY_IMAGE_DATA* im) {
         if (!im) return;
-        cv::Mat m(im->height, im->width, CV_8U, im->buffer);
+        LOGI("IR %s: %dx%d pixelFormat=0x%x size=%u (mono8应为 %d, mono16为 %d)",
+             tag, im->width, im->height, im->pixelFormat, im->size,
+             im->width*im->height, im->width*im->height*2);
+        cv::Mat m;
+        if ((size_t)im->size >= (size_t)im->width * im->height * 2) {
+            // 16bit: 之前按 CV_8U 读会把每像素拆成2字节=满屏噪声。正确读 CV_16U 再 min-max 归一化。
+            cv::Mat m16(im->height, im->width, CV_16U, im->buffer);
+            double mn, mx; cv::minMaxLoc(m16, &mn, &mx);
+            LOGI("IR %s 16bit 动态范围: min=%.0f max=%.0f", tag, mn, mx);
+            double s = (mx > mn) ? 255.0 / (mx - mn) : 1.0;
+            m16.convertTo(m, CV_8U, s, -mn * s);
+        } else {
+            m = cv::Mat(im->height, im->width, CV_8U, im->buffer);
+        }
         char ipath[512];
         snprintf(ipath, sizeof(ipath), "%s/ir_%s_%04d.png", outdir.c_str(), tag, idx);
         cv::imwrite(ipath, m);
     };
     dump_ir("left", irLeftImg);
     dump_ir("right", irRightImg);
+
+    if (!depthImg) { LOGW("frame %d: no depth (-nodepth IR-only mode? skip depth/pcd)", idx); return 0; }
 
     const int dw = depthImg->width, dh = depthImg->height;
     char path[512];
@@ -99,6 +148,9 @@ static void handle_frame(TY_FRAME_DATA* frame, const CbCalib& cb, const std::str
         LOGW("frame %d: depth size=%u != %d (unexpected fmt 0x%x), skip depth png",
              idx, depthImg->size, dw*dh*2, depthImg->pixelFormat);
     }
+    // 有效深度像素(depth!=0)计数 —— 深度有效率是判定 LASER/散斑是否参与深度的客观量。
+    size_t valid_px = 0;
+    for (size_t i = 0; i < depth.size(); ++i) if (depth[i] != 0) valid_px++;
     {
         cv::Mat dm(dh, dw, CV_16U, depth.data());
         snprintf(path, sizeof(path), "%s/depth_%04d.png", outdir.c_str(), idx);
@@ -147,11 +199,15 @@ static void handle_frame(TY_FRAME_DATA* frame, const CbCalib& cb, const std::str
     else {
         snprintf(path, sizeof(path), "%s/points_%04d.pcd", outdir.c_str(), idx);
         write_pcd(p3d.data(), color_for_pc, p3d.size(), path);
+        snprintf(path, sizeof(path), "%s/points_%04d.ply", outdir.c_str(), idx);
+        write_ply(p3d.data(), color_for_pc, p3d.size(), path);   // 与 PCD 同源: 点数/坐标/颜色逐点一致
     }
-    LOGI("frame %d saved: depth %dx%d%s%s%s -> %s",
-         idx, dw, dh,
+    int valid_pct = (int)(valid_px * 100 / ((size_t)dw * dh));
+    LOGI("frame %d saved: depth %dx%d valid=%zu(%d%%)%s%s%s -> %s",
+         idx, dw, dh, valid_px, valid_pct,
          (cw>0? "+color ":""), (cw>0? std::to_string(cw).c_str():""), (ch>0? (std::string("x")+std::to_string(ch)).c_str():""),
          outdir.c_str());
+    return (int)valid_px;
 }
 
 int main(int argc, char* argv[]) {
@@ -166,6 +222,10 @@ int main(int argc, char* argv[]) {
     int depth_idx = 0;   // depth 模式索引: 0=640x480 1=1280x960 2=320x240
     int uniq = -1;       // SGBM uniqueness factor(-1 不改; 越小越宽松=更密但更噪)
     bool nolrc = false;  // 关 SGBM 左右一致性检查(更密, 有假阳性)
+    int laser = -1;  // 散斑投射器功率 override(-1 不改; 0 关, 100 满)。给值会自动关 LASER_AUTO_CTRL 进手动常亮
+    int lauto = -1;  // 投射器 LASER_AUTO_CTRL(频闪) override(-1 不改; 0 手动常亮, 1 自动频闪)
+    int irflash = -1;  // IR 泛光灯(连续 IR 照明, 区别于散斑投射器) override(-1 不改; 0 关, 1 开)
+    bool nodepth = false;  // 纯 IR 模式: 不开 depth 只开 IR —— 验证投射器在 depth 缺席时是否同步照亮 IR 流
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "-ip")) IP = argv[++i];
         else if (!strcmp(argv[i], "-id")) ID = argv[++i];
@@ -179,14 +239,19 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(argv[i], "-dmode")) { int w=atoi(argv[++i]); depth_idx = (w>=1280?1:(w<=320?2:0)); }
         else if (!strcmp(argv[i], "-uniq")) uniq = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-nolrc")) nolrc = true;
+        else if (!strcmp(argv[i], "-laser")) laser = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-lauto")) lauto = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-irflash")) irflash = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-nodepth")) nodepth = true;
         else if (!strcmp(argv[i], "-h")) {
-            LOGI("Usage: %s -ip <IP> [-n frames] [-outdir dir] [-color=off] [-noalign] [-ir] [-ire us] [-irg gain]", argv[0]);
+            LOGI("Usage: %s -ip <IP> [-n frames] [-outdir dir] [-color=off] [-noalign] [-ir] [-ire us] [-irg gain] [-laser 0..100] [-lauto 0|1]", argv[0]);
             return 0;
         }
     }
     if (const char* e = getenv("OUTDIR")) if (e[0]) outdir = e;
     if (IP.empty()) { LOGE("must set -ip <IP>"); return -1; }
     mkdir(outdir.c_str(), 0755);
+    if (nodepth) dump_ir = true;   // 纯 IR 模式: 必须开 IR, 否则没数据
 
     LOGD("Init lib");
     ASSERT_OK(TYInitLib());                          // 1. 初始化库
@@ -203,10 +268,61 @@ int main(int argc, char* argv[]) {
     TY_COMPONENT_ID allComps; ASSERT_OK(TYGetComponentIDs(hDevice, &allComps));
     ASSERT_OK(TYDisableComponents(hDevice, allComps));
 
+    // ── 散斑投射器(LASER)控制 ──────────────────────────────────────────────
+    // 本设备经 DumpAllFeatures 实测 = Gige_2_0: TY_COMPONENT_LASER 存在, TY_INT_LASER_POWER /
+    // TY_BOOL_LASER_AUTO_CTRL 均可读写(access=3)。LASER_AUTO_CTRL=1(出厂默认)时投射器与深度采图
+    // **同步频闪**(只在深度积分窗口点亮), 故单独 dump 的 IR 帧常落在「暗相位」→ 近全黑、增益无效。
+    // 实验: -laser <P> 自动关 auto 进手动常亮, 看 IR 帧是否变亮(投射器是否真发射)、深度有效率是否随 P 变。
+    if (allComps & TY_COMPONENT_LASER) {
+        int32_t p = 0; bool a = false;
+        TYGetInt(hDevice, TY_COMPONENT_LASER, TY_INT_LASER_POWER, &p);
+        TYGetBool(hDevice, TY_COMPONENT_LASER, TY_BOOL_LASER_AUTO_CTRL, &a);
+        LOGI("LASER now: power=%d auto=%d", p, (int)a);
+        if (laser >= 0) {
+            if (lauto < 0) {  // 给了 -laser 未显式给 -lauto → 强制手动常亮, 否则 power 被频闪逻辑接管
+                TYSetBool(hDevice, TY_COMPONENT_LASER, TY_BOOL_LASER_AUTO_CTRL, false);
+            }
+            TYSetInt(hDevice, TY_COMPONENT_LASER, TY_INT_LASER_POWER, (int32_t)laser);
+            int32_t p2 = 0; TYGetInt(hDevice, TY_COMPONENT_LASER, TY_INT_LASER_POWER, &p2);
+            LOGI("LASER power -> %d (manual)", p2);
+        }
+        if (lauto >= 0) {
+            TYSetBool(hDevice, TY_COMPONENT_LASER, TY_BOOL_LASER_AUTO_CTRL, lauto != 0);
+            bool a2 = false; TYGetBool(hDevice, TY_COMPONENT_LASER, TY_BOOL_LASER_AUTO_CTRL, &a2);
+            LOGI("LASER auto -> %d", (int)a2);
+        }
+    } else {
+        LOGW("no TY_COMPONENT_LASER (Gige_2_1 设备走 LightControllerSelector, 本旧 API 不适用)");
+    }
+
+    // ── IR 泛光灯(IR_FLASHLIGHT): 独立于散斑投射器的连续 IR 照明(头文件注: "floodlight used in ir component")。
+    // 判据: 开泛光灯后 dump 的 IR 帧若变亮 → IR dump 路径是活的, 先前全黑=缺照明路由(可救);
+    //       若仍 max=14 → IR dump 是固定暗电平读出, 非活动图像(此 SDK 组件拿不到被照明的 IR)。
+    //       特征归属文档有歧义(Laser 组件 / ir 组件), 故逐组件 TYHasFeature 探测落在哪。
+    if (irflash >= 0) {
+        struct { TY_COMPONENT_ID id; const char* name; } tryComps[] = {
+            {TY_COMPONENT_LASER, "LASER"}, {TY_COMPONENT_IR_CAM_LEFT, "IR_LEFT"},
+            {TY_COMPONENT_IR_CAM_RIGHT, "IR_RIGHT"}, {TY_COMPONENT_DEVICE, "DEVICE"}};
+        bool any = false;
+        for (auto& tc : tryComps) {
+            if (!(allComps & tc.id)) continue;
+            bool has = false;
+            TYHasFeature(hDevice, tc.id, TY_BOOL_IR_FLASHLIGHT, &has);
+            if (!has) continue;
+            bool v = false; TYGetBool(hDevice, tc.id, TY_BOOL_IR_FLASHLIGHT, &v);
+            LOGI("IR_FLASHLIGHT on %s: now=%d -> set %d", tc.name, (int)v, irflash);
+            TYSetBool(hDevice, tc.id, TY_BOOL_IR_FLASHLIGHT, irflash != 0);
+            TYGetBool(hDevice, tc.id, TY_BOOL_IR_FLASHLIGHT, &v);
+            LOGI("IR_FLASHLIGHT on %s -> readback=%d", tc.name, (int)v);
+            any = true;
+        }
+        if (!any) LOGW("TY_BOOL_IR_FLASHLIGHT 不存在于任何组件(本设备无独立 IR 泛光灯)");
+    }
+
     CbCalib cb; cb.depth_scale = 1.0f; cb.has_color = false; cb.align = align;
 
-    // depth
-    if (allComps & TY_COMPONENT_DEPTH_CAM) {
+    // depth (-nodepth 时跳过: 纯 IR 模式, 验证投射器是否同步照亮 IR 流)
+    if (!nodepth && (allComps & TY_COMPONENT_DEPTH_CAM)) {
         TY_IMAGE_MODE mode;
         ASSERT_OK(get_image_mode(hDevice, TY_COMPONENT_DEPTH_CAM, mode, depth_idx));  // 0=640 1=1280 2=320
         LOGI("depth mode %dx%d", TYImageWidth(mode), TYImageHeight(mode));
@@ -225,7 +341,7 @@ int main(int argc, char* argv[]) {
         TYHasFeature(hDevice, TY_COMPONENT_DEPTH_CAM, TY_FLOAT_SCALE_UNIT, &hasScale);
         if (hasScale) TYGetFloat(hDevice, TY_COMPONENT_DEPTH_CAM, TY_FLOAT_SCALE_UNIT, &cb.depth_scale);
         ASSERT_OK(TYGetStruct(hDevice, TY_COMPONENT_DEPTH_CAM, TY_STRUCT_CAM_CALIB_DATA, &cb.depth_calib, sizeof(cb.depth_calib)));
-    } else { LOGE("no depth cam!"); return -1; }
+    } else if (!nodepth) { LOGE("no depth cam!"); return -1; }
 
     // color
     if (with_color && (allComps & TY_COMPONENT_RGB_CAM)) {
@@ -276,17 +392,26 @@ int main(int argc, char* argv[]) {
     ASSERT_OK(TYStartCapture(hDevice));               // 5. 开始取流
 
     int got = 0, tries = 0;
+    long valid_sum = 0;                                // 累计有效深度像素(算整批平均有效率)
     while (got < N && tries < N * 4) {                // 6. 拉取循环(批量取 N 帧)
         TY_FRAME_DATA frame;
         int err = TYFetchFrame(hDevice, &frame, 3000); //    阻塞拉下一帧(3s 超时; 同步 pull, 非回调)
         if (err == TY_STATUS_OK) {
-            handle_frame(&frame, cb, outdir, got);     //    落 depth/color/pcd
+            valid_sum += handle_frame(&frame, cb, outdir, got);  // 落 depth/color/pcd, 返回有效像素数
             got++;
             TYEnqueueBuffer(hDevice, frame.userBuffer, frame.bufferSize);  // 缓冲回笼(乒乓)
         } else {
             LOGW("TYFetchFrame err=%d (try %d)", err, tries);
         }
         tries++;
+    }
+    // 深度有效率汇总: 对比 LASER 开/关、auto/手动 的客观判据(有效率越高=散斑参与越充分)。
+    if (got > 0 && !nodepth) {
+        int dw0 = 1280, dh0 = 960;
+        if (depth_idx == 0) { dw0 = 640; dh0 = 480; }
+        else if (depth_idx == 2) { dw0 = 320; dh0 = 240; }
+        long total = (long)got * dw0 * dh0;
+        LOGI("depth valid rate (avg over %d frames) = %.1f%%", got, total ? 100.0 * valid_sum / total : 0.0);
     }
 
     ASSERT_OK(TYStopCapture(hDevice));

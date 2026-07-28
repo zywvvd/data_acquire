@@ -29,8 +29,18 @@
   - `sample/sample_v1/CMakeLists.txt`:`ALL_SAMPLES` 列表追加 `SimpleView_CaptureDump`(被 foreach 自动编译)。
   - 新增 `sample/sample_v1/SimpleView_CaptureDump/main.cpp`:无头采集,仿 `SimpleView_FetchFrame`/
     `SimpleView_Point3D` 但去 GUI/键盘,取 N 帧各落 `depth_%04d.png`(uint16 mm)、`color_%04d.jpg`(原分辨率 BGR)、
-    `points_%04d.pcd`(ASCII,米,带 rgb)。点云:`TYMapRGBImageToDepthCoordinate` → `TYMapDepthImageToPoint3d`;
-    `write_pcd` 两遍法先数有效点再写,`POINTS` 头与行数一致。
+    `points_%04d.pcd`(ASCII,米,带 rgb) + `points_%04d.ply`(binary,米,带 rgb)。点云:`TYMapRGBImageToDepthCoordinate`
+    → `TYMapDepthImageToPoint3d`;`write_pcd` 两遍法先数有效点再写,`POINTS` 头与行数一致。`write_ply` 与 `write_pcd`
+    **同源**(同一份点数组/颜色),逐点判定与 BGR→RGB 转换完全镜像,保证 PLY 与 PCD 点数/坐标/颜色逐点一致
+    (实测 xyz 最大差 = PCD `%.4f` 舍入 5e-5m,颜色 uint8 全等)。加 PLY 是为本机 CloudCompare(2.11 apt 未带 PCL/PDAL、
+    不认 `.pcd`)兜底——PLY 是其核心一等格式。
+  - 诊断/调参开关(均经实测,设备=Gige_2_0、旧 API 有效):`-dmode 1280`(满分辨率深度,默认)/
+    `-ire/-irg`(IR 曝光·增益)/ `-uniq/-nolrc`(放宽 SGBM 换密度)/ `-ir`(同开左右 IR——与 depth 同开得灭灯暗帧)/
+    **`-laser <0..100>` + `-lauto <0|1>`**(散斑投射器功率/频闪;`-laser` 给值自动关 auto 进手动常亮)/
+    **`-nodepth`**(纯 IR 模式:只开 IR 不开 depth,投射器转而同步给 IR 流 → 拍到真散斑)/
+    `-irflash`(IR 泛光灯,本设备 `TYHasFeature=false` 即无此件)。每帧末尾打深度有效率、整批打平均有效率
+    (LASER 开关的客观判据)。启动时读+打 `LASER now: power=X auto=Y` 并锁定 IR gain=32(设置持久化,
+    不锁会被残留污染致深度归零)。投射器/IR 排障全记录见 `sensors/structured_light/STRUCTURED_LIGHT.md` §8。
 - **重新获取**:
   ```bash
   git clone https://github.com/percipioxyz/camport4.git

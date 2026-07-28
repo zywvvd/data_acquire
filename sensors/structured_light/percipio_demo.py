@@ -34,23 +34,28 @@ def main():
     ap.add_argument("-n", type=int, default=6, help="采集帧数(默认 6)")
     ap.add_argument("--out", default=None, help="输出目录, 默认 data/fm815_114")
     ap.add_argument("--no-align", dest="no_align", action="store_true", help="不做 color->depth 对齐, 点云不带色")
+    ap.add_argument("--ir", action="store_true", help="同开左右 IR(与 depth 同开 -> 灭灯暗帧 max~14, 非真散斑; 真散斑用二进制 -nodepth 单开, 见 README/STRUCTURED_LIGHT.md §8)")
     args = ap.parse_args()
 
     out = args.out or os.path.join("data", "fm815_114")
     os.makedirs(out, exist_ok=True)
 
-    spec = {"ip": args.ip, "frames": args.n, "no_align": args.no_align,
+    spec = {"ip": args.ip, "frames": args.n, "no_align": args.no_align, "ir": args.ir,
             "model": "FM815-IX-E1"}
     s = PercipioSensor("structured_light", spec)
     s.out_dir = out
-    print(f"PercipioSensor  ip={args.ip}  frames={args.n}  -> {out}\n")
+    print(f"PercipioSensor  ip={args.ip}  frames={args.n}  ir={args.ir}  -> {out}\n")
     n = capture_once(s)
-    # 汇总三类产物
+    # 汇总产物(按扩展名区分 pcd/ply; ir 仅 --ir 时有)
     files = sorted(os.listdir(out))
-    depth = sum(1 for f in files if f.startswith("depth_"))
+    depth = sum(1 for f in files if f.startswith("depth_") and f.endswith(".png") and "_vis" not in f)
     color = sum(1 for f in files if f.startswith("color_"))
-    pcd = sum(1 for f in files if f.startswith("points_"))
-    print(f"done: {n} 帧  depth {depth} / color {color} / pcd {pcd}  -> {out}")
+    pcd  = sum(1 for f in files if f.startswith("points_") and f.endswith(".pcd"))
+    ply  = sum(1 for f in files if f.startswith("points_") and f.endswith(".ply"))
+    irl  = sum(1 for f in files if f.startswith("ir_left_"))
+    irr  = sum(1 for f in files if f.startswith("ir_right_"))
+    extra = f" / ir_left {irl} / ir_right {irr}" if args.ir else ""
+    print(f"done: {n} 帧  depth {depth} / color {color} / pcd {pcd} / ply {ply}{extra}  -> {out}")
 
 
 if __name__ == "__main__":

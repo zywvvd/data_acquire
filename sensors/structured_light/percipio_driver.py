@@ -53,6 +53,8 @@ class PercipioSensor(SubprocessSensor):
                "-outdir", os.path.abspath(self.out_dir)]
         if s.get("no_align"):
             cmd.append("-noalign")
+        if s.get("ir"):               # 同开左右 IR(与 depth 同开 -> 灭灯暗帧 max~14, 非真散斑; 真散斑用 -nodepth 单开, 见 STRUCTURED_LIGHT.md §8)
+            cmd.append("-ir")
         return cmd
 
     def _env(self):
