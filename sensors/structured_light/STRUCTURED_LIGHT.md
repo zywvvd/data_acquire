@@ -21,7 +21,10 @@
 | `σ_d` | 子像素视差噪声 | px |
 | `ΔZ` | 每 1 视差像素对应的深度增量 | mm |
 
-**坐标系**:原点在左相机光心(双目)或相机光心(单目);$+Z$ 沿光轴(深度方向),$+X$ 沿基线方向,$+Y$ 纵向;像坐标以主点为原点。**量纲自洽**:$Z=fB/d\;\to\;\text{px·mm/px}=\text{mm}$。
+**坐标系**:原点在左相机光心(双目)或相机光心(单目);$+Z$ 沿光轴(深度方向),$+X$ 沿基线方向,$+Y$ 纵向;像坐标以主点为原点。**量纲自洽**:
+$$
+Z=fB/d\;\to\;\text{px·mm/px}=\text{mm}
+$$
 
 ### 1.1 结构光概述与两种架构
 
@@ -44,8 +47,9 @@
 
 如图,物点 $P=(X,Z)$($Z>f$)的光线 $OP$ 与像面 $z=f$ 相交于像点 $p$。**小三角形 $O\text{-}f\text{-}p$ 与大三角形 $O\text{-}Z\text{-}P$ 相似**,对应边成比例,故像点 $p$ 的横向坐标 $x$ 满足:
 
-$$\frac{x}{f}=\frac{X}{Z}\quad\Longrightarrow\quad x=f\,\frac{X}{Z}\qquad(\text{纵向同理 } y=f\,\tfrac{Y}{Z})$$
-
+$$
+\frac{x}{f}=\frac{X}{Z}\quad\Longrightarrow\quad x=f\,\frac{X}{Z}\qquad(\text{纵向同理 } y=f\,\tfrac{Y}{Z})
+$$
 此即针孔投影:3D 点 $(X,Y,Z)$ 投到像点 $\bigl(f\,\tfrac{X}{Z},\; f\,\tfrac{Y}{Z}\bigr)$。投影把三维坐标压成二维 $(x,y)$,$Z$ 在此过程中消失——同一条光线 $OP$ 上远近不同的物点都投到同一个像点 $p$。因此单张图像无法区分「近处的小物」与「远处的大物」,这是单目不能测距的根本原因,也是需要双目(两个观察点)的动机。
 
 ### 1.3 双目立体视觉:三角测量与深度公式
@@ -61,11 +65,17 @@ $$\frac{x}{f}=\frac{X}{Z}\quad\Longrightarrow\quad x=f\,\frac{X}{Z}\qquad(\text{
 
 两式相减得视差:
 
-$$d=x_L-x_R=\frac{fX}{Z}-\frac{f(X-B)}{Z}=\frac{fB}{Z}$$
+$$
+d=x_L-x_R=\frac{fX}{Z}-\frac{f(X-B)}{Z}=\frac{fB}{Z}
+$$
+
 
 视差 $d$ 与深度 $Z$ 完全确定,解出:
 
-$$\boxed{\,Z=\dfrac{f\,B}{d}\,}$$
+$$
+\boxed{\,Z=\dfrac{f\,B}{d}\,}
+$$
+
 
 $f$、$B$ 为标定常数,$d$ 由两幅图测得,即得深度 $Z$。物点移近($Z$ 减小)则 $d=fB/Z$ 增大,移远则 $d$ 减小,故视差大对应近、小对应远。
 
@@ -90,20 +100,23 @@ $f$、$B$ 为标定常数,$d$ 由两幅图测得,即得深度 $Z$。物点移近
 
 Z 已知后,X、Y 由左图像坐标反推(针孔投影的逆):
 
-$$X=x_L\,\frac{Z}{f},\qquad Y=y_L\,\frac{Z}{f}$$
-
+$$
+X=x_L\,\frac{Z}{f},\qquad Y=y_L\,\frac{Z}{f}
+$$
 每个深度像素 $(x_L,y_L)$ 与其 $Z$ 组合为一个 3D 点 $(X,Y,Z)$,全图遍历即得点云。$Z$ 为轴向深度(沿光轴的垂直距离),即 $d=fB/Z$ 直接给出的量,非斜距;轴向深度只随物体远近变化、与像素位置无关,故平墙的轴向深度近似常数。
 
 ### 1.5 深度精度 ΔZ = Z²/(f·B) 与子像素
 
 对 $Z=fB/d$ 求视差 $d$ 的微分,含义为视差每抖动 $dd$ 像素引起的深度误差 $dZ$:
 
-$$Z=\frac{fB}{d}\;\Longrightarrow\;\frac{dZ}{dd}=-\frac{fB}{d^2},\qquad |dZ|=\frac{fB}{d^2}|dd|=\frac{Z^2}{fB}|dd|$$
-
+$$
+Z=\frac{fB}{d}\;\Longrightarrow\;\frac{dZ}{dd}=-\frac{fB}{d^2},\qquad |dZ|=\frac{fB}{d^2}|dd|=\frac{Z^2}{fB}|dd|
+$$
 视差每差 1 像素($|dd|=1$),深度差:
 
-$$\Delta Z=\frac{Z^2}{f\,B}$$
-
+$$
+\Delta Z=\frac{Z^2}{f\,B}
+$$
 深度被视差量化,因 $\Delta Z\propto Z^2$,深度精度随距离平方退化——此为双目(及一切三角测距)的几何属性。
 
 实际匹配为子像素(sub-pixel):SGBM 通过块相关度的亚像素插值,视差精度可达 0.1 像素量级。设子像素视差噪声为 $\sigma_d$,则深度噪声 $\mathrm{RMS}\approx\sigma_d\,\dfrac{Z^2}{fB}$。$\sigma_d$ 由匹配算法与纹理质量决定,与距离近似无关,故深度噪声继承 $\Delta Z\propto Z^2$。
@@ -118,7 +131,10 @@ $$\Delta Z=\frac{Z^2}{f\,B}$$
 
 **视差搜索窗** $[d_{\min},\,d_{\max}]$ 是什么、怎么得来:它是 SGBM 的一个**配置参数**,而非物理常量。匹配器只在此范围内的候选视差里搜索,超出即判为无匹配、深度无效。该窗由两个量决定:起始视差 $d_{\min}$(SDK `DISPARITY_OFFSET`)与视差个数 $N$(SDK `DISPARITY_NUM`),$d_{\max}=d_{\min}+N$;制造商按设备的预期工作距离选定该窗,使其经 $Z=fB/d$ 换算后覆盖目标量程(本设备 $d_{\min}=25$、$N=162$ → $[25,187]$ → 0.59–4.4 m,见 §2.3)。之所以是有限窗而非 0 到无穷:① 计算量随视差范围线性增长,须裁剪以保实时;② 视差过小(远距)则基线相对距离过短、三角测量失效;③ 视差过大(近距)则匹配窗越过图像边界、左右立体重叠不足。该窗经 $Z=fB/d$ 换算即工作量程:
 
-$$Z_{\min}=\frac{fB}{d_{\max}}\;(\text{近端}),\qquad Z_{\max}=\frac{fB}{d_{\min}}\;(\text{远端})$$
+$$
+Z_{\min}=\frac{fB}{d_{\max}}\;(\text{近端}),\qquad Z_{\max}=\frac{fB}{d_{\min}}\;(\text{远端})
+$$
+
 
 即**工作量程 = 视差搜索窗经 $Z=fB/d$ 换算**。量程应以视差窗与几何推导为准,而非从数据有效值上下界反推(后者为循环论证)。
 
@@ -189,7 +205,7 @@ u_p 已知化的三种主流方案:
 
 把本设备的实测参数代入第一部分的理论公式,得到可验证的预测:
 
-- 焦距 $f=1102.09$ px,基线 $B=99.89$ mm,$fB\approx 110\,080\,\text{px·mm}$(单位是 px·mm 而非 mm²:用于 $Z=fB/d$ 时其 px 与视差 $d$ 的 px 相消,结果为 mm)。
+- 焦距 $f=1102.09$ px,基线 $B=99.89$ mm,$fB\approx 110\,080\,\text{px·mm}$(单位是 px·mm :用于 $Z=fB/d$ 时其 px 与视差 $d$ 的 px 相消,结果为 mm)。
 - 视场 $\text{HFOV}=2\arctan(640/1102.09)=60.2°$、$\text{VFOV}=2\arctan(480/1102.23)=47.1°$;点云呈以相机为顶点的扇形径向展开即此视场锥的几何表现。
 - 视差示例(§1.3 的 $d=fB/Z$):1 m 处 $d\approx110$ px,0.6 m 处 $d\approx187$,4 m 处 $d\approx27$。
 - 量程预测(§1.6):实测视差窗 `DISPARITY_OFFSET=25`、`DISPARITY_NUM=162`,即 $d\in[25,187]$;$Z_{\min}=110080/187\approx589\,\text{mm}\approx0.59\,\text{m}$,$Z_{\max}=110080/25\approx4403\,\text{mm}\approx4.41\,\text{m}$。
