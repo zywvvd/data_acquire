@@ -59,7 +59,9 @@ class LivoxSensor(SubprocessSensor):
         for _dev, body in cfg.items():           # 把所有 host_net_info[].host_ip 改成采集机 IP
             for h in body.get("host_net_info", []):
                 h["host_ip"] = host_ip
-        path = os.path.join(self.out_dir, "device.json")
+        # 必须用绝对路径: 子进程以 cwd=out_dir 启动(见 base.py), 相对路径会被解析成
+        # out_dir/out_dir/device.json → fopen 返回 NULL → rapidjson `fp_ != 0` 断言崩溃。
+        path = os.path.abspath(os.path.join(self.out_dir, "device.json"))
         with open(path, "w") as f:
             json.dump(cfg, f, indent=2)
         return path

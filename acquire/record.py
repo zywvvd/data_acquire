@@ -20,6 +20,9 @@
     裸 python3.14(VSCode 默认选它)缺依赖会 ModuleNotFoundError。
   · 采相机/鱼眼前设 SDK 库路径(LiDAR / 结构光的库由各自驱动自动注入, 无需手设):
         export LD_LIBRARY_PATH=$PWD/third_party/EN-HCNetSDKV6.1.9.4_build20220412_linux64/lib
+  · 多路 LiDAR 并发大流量时, 禾赛这类大帧 UDP 流易因内核接收缓冲不足丢包。采集前把 rmem_max 调大
+    (一次性, 重启失效; sample_pcd 启动时也会尝试 sudo 调, 无密码则失败):
+        sudo sysctl -w net.core.rmem_max=67108864 net.core.rmem_default=67108864
 
 【用法示例】
   # 0. 先看 rig.yaml 里有哪些设备 / 各自 name(用 --only 前查一眼)
@@ -28,6 +31,9 @@
 
   # 1. 全部 7 路并发, 全局 10s
   python3 acquire/record.py --duration 10
+
+  # 1b. 全部 7 路并发, 每台采够 100 帧(各路达 100 帧自停 —— 推荐用法)
+  python3 acquire/record.py --frames 100
 
   # 2. 只采一台(例: 禾赛 QT128, 10s)
   python3 acquire/record.py --only lidar_hesai --duration 10
@@ -39,12 +45,12 @@
   # 4. 给本次 run 命名(输出目录 data/calib01_<时间戳>/)
   python3 acquire/record.py --only cam_hik,structured_light --tag calib_01 --duration 8
 
-  # 5. 不写 --duration: 流式 LiDAR 按各自 spec.duration 自停, 相机/鱼眼 Ctrl-C 停
+  # 5. 不写 --duration/--frames: 流式 LiDAR 按各自 spec.duration 自停, 相机/鱼眼 Ctrl-C 停
   python3 acquire/record.py --only cam_hik,lidar_hesai
 
   # 6. 采相机/鱼眼(先 export LD_LIBRARY_PATH, 见「前置」)
   export LD_LIBRARY_PATH=$PWD/third_party/EN-HCNetSDKV6.1.9.4_build20220412_linux64/lib
-  python3 acquire/record.py --only cam_hik,fisheye_hik --duration 10
+  python3 acquire/record.py --only cam_hik,fisheye_hik --frames 100
 
   # 7. Ctrl-C 优雅停止: 第一次 Ctrl-C 收尾, 再按一次强制退出
   python3 acquire/record.py                # 跑起来后按 Ctrl-C
@@ -56,6 +62,13 @@
   · 相机/鱼眼: 持续拍, 到 --duration 或 Ctrl-C 停。
   不给 --duration: 流式按各自 spec.duration 自停; 相机/鱼眼靠 Ctrl-C 停。
 
+【--frames N: 每设备采够 N 帧自停(推荐, 替代 --duration 的模糊控制)】
+  · 各设备"帧"速率差异极大(相机按 interval、LiDAR 按自身转速、结构光按批量 N), 统一 --duration
+    无法让每台都精确达 N 帧; --frames 让每路采够 N 帧即停该路, 各路互不影响。
+  · 结构光(批量): --frames 覆盖其 N 帧; 流式 LiDAR: 自动给足兜底时长、靠计数达 N 停;
+    相机/鱼眼: 按 interval 循环到 N 帧。
+  · 可与 --duration 同用(--duration 作全局硬超时); 单给 --frames 时按 N 自动估算兜底上限。
+
 【输出布局】
   data/<tag_时间戳>/
   ├── cam_hik/  fisheye_hik/  structured_light/  lidar_hesai/ ...   # 每路一个子目录
@@ -65,7 +78,9 @@
   └── align.csv                # 以相机为基准的跨传感器最近邻对齐(无相机则不生成)
 
 【CLI 参数】
+  --frames  N    每设备采够 N 帧自停(推荐)。结构光批量据此定 N, 流式/相机靠计数达 N 停。
   --duration N   全局采集时长(s)。不给则流式按各自 spec.duration 自停、相机靠 Ctrl-C 停。
+                 与 --frames 同用时作硬超时兜底。
   --only  NAMES  只采指定设备(逗号分隔 name, 无空格)。不给则采全部 enabled 设备。
   --tag   NAME   给本次 run 命名(目录 data/<tag>_<时间戳>/)。不给则用纯时间戳。
 
@@ -120,8 +135,9 @@ def _append_manifest(path, sample):
         }, ensure_ascii=False) + "\n")
 
 
-def _run_one(sensor: Sensor, stop: threading.Event, manifest: str):
-    """单路采集循环: grab → 落 manifest → 打印, 直到 ended / stop。"""
+def _run_one(sensor: Sensor, stop: threading.Event, manifest: str,
+             target_frames: int = None):
+    """单路采集循环: grab → 落 manifest → 打印, 直到 ended / stop / 采够 target_frames。"""
     interval = sensor.spec.get("interval", DEFAULT_INTERVAL)
     n = 0
     try:
@@ -134,13 +150,17 @@ def _run_one(sensor: Sensor, stop: threading.Event, manifest: str):
                 n += 1
                 m = sample.meta
                 base = os.path.basename(str(sample.payload)) if sample.payload else "-"
+                goal = f"  {n}/{target_frames}" if target_frames else ""
                 print(f"  {sensor.name}: #{m.get('frame', '-')} "
-                      f"{m.get('bytes', '-')}B  -> {base}")
-                if stop.wait(interval):    # 可被 stop 立即唤醒的 sleep
+                      f"{m.get('bytes', '-')}B  -> {base}{goal}")
+                if target_frames and n >= target_frames:
+                    break                       # 采够 N 帧, 该路自然结束
+                if stop.wait(interval):         # 可被 stop 立即唤醒的 sleep
                     break
     except Exception as e:
         print(f"  {sensor.name} 采集异常: {e}")
-    print(f"  [{sensor.name}] 结束, 共 {n} 帧")
+    done = f" (目标 {target_frames})" if target_frames else ""
+    print(f"  [{sensor.name}] 结束, 共 {n} 帧{done}")
     return n
 
 
@@ -215,16 +235,22 @@ def main():
   lidar_solid_livox / lidar_hesai / lidar_robosense_front / lidar_robosense_rear
 
 示例:
-  python3 acquire/record.py --duration 10                                  # 全部 7 路
+  python3 acquire/record.py --frames 100                                  # 全 7 路各采 100 帧(推荐)
+  python3 acquire/record.py --duration 10                                  # 全 7 路, 全局 10s
   python3 acquire/record.py --only lidar_hesai --duration 10               # 只采一台
-  python3 acquire/record.py --only cam_hik,lidar_hesai --duration 10       # 多台(逗号分隔)
+  python3 acquire/record.py --only cam_hik,lidar_hesai --frames 50         # 多台各 50 帧
   python3 acquire/record.py --only cam_hik --tag calib_01 --duration 8     # 给 run 命名
   python3 acquire/record.py                                                # Ctrl-C 停相机
 
 (采相机/鱼眼前先: export LD_LIBRARY_PATH=$PWD/third_party/EN-HCNetSDKV6.1.9.4_build20220412_linux64/lib)
+(多路 LiDAR 并发前建议: sudo sysctl -w net.core.rmem_max=67108864 net.core.rmem_default=67108864)
 详细用法见本文件顶部 docstring。""")
+    ap.add_argument("--frames", type=int, default=None,
+                    help="每设备采够 N 帧自停(推荐, 替代 --duration); "
+                         "结构光批量据此定 N, 流式/相机靠计数达 N 停")
     ap.add_argument("--duration", type=float, default=None,
-                    help="全局采集时长(s); 不给则 Ctrl-C 停(流式 LiDAR 仍按各自 spec.duration 自停)")
+                    help="全局采集时长(s), 与 --frames 同用时作硬超时兜底; "
+                         "不给则 Ctrl-C 停(流式 LiDAR 仍按各自 spec.duration 自停)")
     ap.add_argument("--tag", default=None, help="run 命名(目录 data/<tag>_<ts>/)")
     ap.add_argument("--only", default=None, help="只采指定设备(逗号分隔 name), 如 cam_hik,lidar_hesai")
     args = ap.parse_args()
@@ -255,6 +281,11 @@ def main():
         spec["host_ip"] = host_ip
         if args.duration is not None:
             spec["duration"] = args.duration    # 全局 duration 覆盖流式时长
+        if args.frames is not None:
+            spec["frames"] = args.frames        # 结构光批量型 N 帧覆盖
+            # 流式 LiDAR 默认 duration=10s 会提前 ended; 不给 --duration 时给足兜底, 实际靠计数停
+            if args.duration is None:
+                spec["duration"] = max(args.frames * 2, 90)
         try:
             out = run_dir / name
             out.mkdir(parents=True, exist_ok=True)
@@ -278,23 +309,39 @@ def main():
         stop.set()
     signal.signal(signal.SIGINT, _sig)
 
-    print(f"\n启动 {len(sensors)} 路, " +
-          (f"全局 {args.duration}s 后停" if args.duration else "流式自停 + Ctrl-C 停相机") + " ...")
+    mode = (f"每路采够 {args.frames} 帧" if args.frames else
+            (f"全局 {args.duration}s 后停" if args.duration else "流式自停 + Ctrl-C 停相机"))
+    print(f"\n启动 {len(sensors)} 路, {mode} ...")
     threads = []
     for s in sensors:
         manifest = os.path.join(s.out_dir, "manifest.jsonl")
-        t = threading.Thread(target=_run_one, args=(s, stop, manifest), daemon=True)
+        t = threading.Thread(target=_run_one, args=(s, stop, manifest, args.frames), daemon=True)
         t.start()
         threads.append(t)
 
-    if args.duration is not None:
+    if args.duration is not None and args.frames is None:
         stop.wait(args.duration + 3)           # 容差: 等流式自然收尾
         stop.set()
     else:
-        while not stop.is_set() and any(t.is_alive() for t in threads):
+        # --frames: 等各路采够 N 帧自然结束; 无参: 等流式自停 / Ctrl-C
+        # 兜底上限须容下最慢的批量设备: 结构光 full-res 采 100 帧约需 frames*8s(子进程
+        # _batch_timeout = N*8+15)。若按 frames*2 估, --frames 100 时 230s 会把还在跑的
+        # 结构光误判超时(只落十几帧)。正常各路采够 N 帧会提前结束, 此上限仅在某路真挂起时兜底。
+        hard = (max(args.frames * 10, 300) + 60) if args.frames else 86400
+        deadline = time.monotonic() + hard
+        while not stop.is_set() and any(t.is_alive() for t in threads) and time.monotonic() < deadline:
             time.sleep(0.3)
+        stop.set()
     for t in threads:
         t.join(timeout=10)
+    # 显式关停每路 sensor 的子进程: 流式 LiDAR 的 grab() 不响应 stop 事件, 其线程可能仍阻塞在
+    # grab() 的等待循环里; 仅靠 daemon 线程隐式退出不会触发 close(), 会把 sample_pcd / rs_driver
+    # 等子进程孤儿化(继续往 out_dir 写文件, 污染本次 run 的帧数)。这里逐个 close 兜底。
+    for s in sensors:
+        try:
+            s.close()
+        except Exception as e:
+            print(f"  [{s.name}] 关停异常: {e}")
 
     manifests = _load_manifests(run_dir)
     idx, nidx = _write_index(run_dir, manifests)

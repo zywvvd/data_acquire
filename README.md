@@ -86,16 +86,26 @@ data/<run>/<name>/{帧文件} + manifest.jsonl  ;  run 级 index.csv / align.csv
 
 ```bash
 export LD_LIBRARY_PATH=$PWD/third_party/EN-HCNetSDKV6.1.9.4_build20220412_linux64/lib   # 仅采相机/鱼眼时需要; LiDAR/结构光驱动自动注入
+# 多路 LiDAR 并发前调大 UDP 接收缓冲(否则禾赛大帧易丢包; 一次性, 重启失效):
+sudo sysctl -w net.core.rmem_max=67108864 net.core.rmem_default=67108864
 
-python3 acquire/record.py --duration 10                                            # 1) 全部 7 路并发
-python3 acquire/record.py --only lidar_hesai --duration 10                         # 2) 只采一台
-python3 acquire/record.py --only cam_hik,lidar_robosense_front,lidar_robosense_rear --duration 10  # 3) 多台(逗号分隔, 无空格)
-python3 acquire/record.py --only cam_hik,structured_light --tag calib_01 --duration 8   # 4) 给本次 run 命名
-python3 acquire/record.py                                                          # 5) 不写 --duration: 流式按各自 duration 自停, 相机 Ctrl-C 停
+python3 acquire/record.py --frames 100                                             # 1) 全 7 路各采 100 帧(推荐, 各路采够即停)
+python3 acquire/record.py --duration 10                                            # 2) 全 7 路, 全局 10s
+python3 acquire/record.py --only lidar_hesai --frames 100                          # 3) 只采一台
+python3 acquire/record.py --only cam_hik,lidar_robosense_front,lidar_robosense_rear --frames 100  # 4) 多台(逗号分隔, 无空格)
+python3 acquire/record.py --only cam_hik,structured_light --tag calib_01 --frames 100  # 5) 给本次 run 命名
+python3 acquire/record.py                                                          # 6) 不写 --duration/--frames: 流式按各自 duration 自停, 相机 Ctrl-C 停
 ```
 
-`--duration` 对不同设备的意义:流式 LiDAR 到点自停;结构光采完 N 帧自停(`--duration` 只决定
-record 等多久,不影响帧数);相机/鱼眼持续拍到 `--duration` 或 Ctrl-C。
+**`--frames N`(推荐)**:各路采够 N 帧即停该路,各路互不影响(相机按 interval、LiDAR 按转速、结构光
+批量采 N 帧)。比 `--duration` 精确——各设备速率差异极大,统一时长无法让每台都精确达 N 帧。`--duration`
+则是全局时长(流式 LiDAR 到点自停;结构光的 `--duration` 只决定 record 等多久,不影响其批量帧数;相机
+持续拍到点或 Ctrl-C)。两者可同用,`--duration` 作硬超时兜底。
+
+> **流式设备会多写文件**:禾赛/速腾/Livox 的子进程持续往 `out_dir` 写 PCD,record 每路只 grab 够 N 帧即停
+> 该路线程,但子进程在停之前已写入远多于 N 的帧;批量设备(结构光)若被兜底超时截断,manifest 可能只
+> 记 1 条但磁盘已写满 N 帧。**以 manifest 为权威清单**,采完后跑 `tools/tidy_run.py`(§4.4)裁剪冗余帧、
+> 重生成索引,让「每设备 N 帧」名副其实。
 
 输出:`data/<tag_><时间戳>/<name>/{帧} + manifest.jsonl`;run 根有 `index.csv`(全帧时间轴,按 ts
 排序)与 `align.csv`(以相机为基准的跨传感器最近邻对齐,列布局为每传感器 `ts,payload` 相邻)。
@@ -123,6 +133,26 @@ python3 tools/view_depth.py data/fm815_114/ --cmap turbo         # 整目录批�
 python3 tools/view_cloud.py data/fm815_114/                      # 多帧点云 ←/→ 翻帧, 空格播放
 python3 tools/view_cloud.py data/hesai_qt128/ --backend auto     # 优先 open3d, 缺则 matplotlib
 ```
+
+### 4.4 收尾整理 `tidy_run.py`(以 manifest 为权威清单)
+
+承接上一节:流式/批量设备的磁盘帧常多于 manifest。`tidy_run.py` 以 manifest 为权威清单收尾:
+
+```bash
+python3 tools/tidy_run.py data/<run> --trim                          # 删各设备 manifest 未引用的冗余帧
+python3 tools/tidy_run.py data/<run> --rebuild structured_light:100    # 据 pcd 重建被截断的 manifest(取前 100 帧)
+python3 tools/tidy_run.py data/<run> --rebuild lidar_solid_livox:100 --trim --normalize  # 重建 + 裁剪 + ts 归一化
+```
+
+- `--trim`:按文件名末段数字(=帧号)判定,同一帧的关联文件(结构光的 points/color/depth/ir)一起留或删。
+- `--rebuild NAME[:N]`:manifest 缺失/被截断但磁盘帧完整时,据磁盘 pcd 重建 manifest(取前 N 帧)。
+- `--normalize`:把 manifest 的 `ts` 改成文件 mtime(墙上时钟)。record 原用 `time.monotonic()`,各设备/各次
+  run 间不可比;归一为 mtime 后 `index.csv`/`align.csv` 的跨传感器最近邻对齐才有意义。
+- 末尾总是重生成 run 级 `index.csv` 与 `align.csv`。
+
+> 采集时若有 LiDAR 子进程被孤儿化(record 异常退出、Ctrl-C 没收尾),它会继续写文件污染 run 目录,
+> 表现为 trim 后帧数又涨——先 `pkill -x sample_pcd`、`pkill -x rs_driver_pcdsaver` 杀干净再 tidy。
+> record 现已在退出前显式 `close` 各路 sensor,正常流程不会再孤儿化。
 
 ## 5. `data/` 布局
 
@@ -205,6 +235,11 @@ data/
 8. **海康通道**:SDK 逻辑通道从 1 起,RTSP/ISAPI 是 101/102。
 9. **图漾 SDK**:用 Camport4(V4 API),非 VcameraSDK、非 Camport3。
 10. **凭证**:仅海康相机需登录(`admin` / `b@light2.`);LiDAR/结构光走 UDP/SDK 主动查询,无凭证。
+11. **多路 LiDAR 并发丢包(禾赛)**:大帧 UDP 流并发时默认 `rmem_max`(208KB)太小会丢包致 0/少帧。
+    采集前 `sudo sysctl -w net.core.rmem_max=67108864 net.core.rmem_default=67108864`(一次性,重启失效)。
+12. **Livox HAP 启动有 ~7s 暖机**:SDK init → 发现 → 置 Normal 后,点云要再等约 7s 才开始流入。
+    `--seconds`/`--duration` 给不够(<15s)会采到 0 帧;采 100 帧约需 20s 以上。
+13. **流式设备磁盘帧 > manifest**:见 §4.4,采完用 `tools/tidy_run.py --trim` 收尾。
 
 ## 11. 仓库结构
 
@@ -221,9 +256,10 @@ data_acquire/
 │   ├── lidar_robosense/      #   速腾: robosense_driver + robosense_demo
 │   ├── lidar_livox/          #   Livox: livox_driver + livox_demo + hap/mid360 json
 │   └── structured_light/     #   图漾: percipio_driver + percipio_demo
-├── tools/                    # 离线查看
+├── tools/                    # 离线查看 / 收尾整理
 │   ├── view_depth.py         #   uint16 mm 深度图 → 归一化彩色
-│   └── view_cloud.py         #   多帧点云 ←/→ 翻帧(open3d / matplotlib)
+│   ├── view_cloud.py         #   多帧点云 ←/→ 翻帧(open3d / matplotlib)
+│   └── tidy_run.py           #   按 manifest 裁剪冗余帧 / 重建 manifest / 重生成索引
 ├── third_party/              # 厂商 SDK(自包含; 来源/改动见 SOURCES.md)
 └── data/                     # 采集输出(.gitignore)
 ```
