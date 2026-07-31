@@ -232,16 +232,22 @@ class SubprocessSensor(Sensor):
         self._stop_proc()
 
     def close(self):
-        """子进程型: 把残余 stderr 落到 out_dir/sensor.log 便于排查, 再 stop。"""
-        if self._proc is not None and getattr(self._proc, "stderr", None) is not None:
+        """子进程型: 先终止子进程(让其 stderr 到 EOF), 再把残余 stderr 落到 sensor.log。
+
+        必须先 _stop_proc 再读 stderr: 流式 LiDAR 的子进程(禾赛 sample_pcd / 速腾 rs_driver)
+        不会自停, 若先 self._proc.stderr.read() 会一直阻塞到子进程自然退出(永不)——该路线程卡死,
+        record 主循环等不到线程结束而挂到兜底 deadline, 且子进程持续写文件污染本次 run。
+        """
+        proc = self._proc
+        self._stop_proc()                       # 先 terminate/kill → 子进程退出 → stderr 到 EOF
+        if proc is not None and getattr(proc, "stderr", None) is not None:
             try:
-                err = self._proc.stderr.read() if self._proc.stderr else b""
+                err = proc.stderr.read() if proc.stderr else b""   # 子进程已退出, read 不再阻塞
                 if err:
                     with open(os.path.join(self.out_dir, "sensor.log"), "wb") as f:
                         f.write(err)
             except Exception:
                 pass
-        self._stop_proc()
 
 
 def capture_once(sensor: Sensor, max_frames: int = None, verbose: bool = True) -> int:
