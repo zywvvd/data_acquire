@@ -38,6 +38,7 @@
 struct PcdPoint { float x, y, z; uint8_t refl; };
 
 static std::vector<PcdPoint> g_frame;
+static size_t g_pts_per_frame = 50000;   // 每帧累积点数阈值(LIVOX_POINTS_PER_FRAME 覆盖; 调大→单帧含更多秒数据)
 static uint8_t g_last_frame = 0;
 static bool g_first = true;
 static int g_frame_idx = 0;
@@ -71,8 +72,9 @@ void PointCloudCallback(uint32_t handle, const uint8_t dev_type, LivoxLidarEther
     return;
   }
 
-  // HAP 的 frame_cnt 实测恒为 0(不随旋转递增), 改按累积点数切片: 每 50000 点落一帧(约 10Hz)。
-  if (g_frame.size() >= 50000) FlushFrame();
+  // HAP 的 frame_cnt 实测恒为 0(不随旋转递增), 改按累积点数切片: 累满 g_pts_per_frame 点落一帧
+  // (默认 50000~10Hz; LIVOX_POINTS_PER_FRAME 调大→每帧含更多秒、单帧更稠密)。
+  if (g_frame.size() >= g_pts_per_frame) FlushFrame();
 
   const LivoxLidarCartesianHighRawPoint* pts =
       reinterpret_cast<const LivoxLidarCartesianHighRawPoint*>(data->data);
@@ -103,6 +105,7 @@ int main(int argc, const char* argv[]) {
   if (const char* out = getenv("PCD_OUT")) if (out[0]) g_outdir = out;
   int run_secs = 15;
   if (const char* s = getenv("LIVOX_RUN_SECS")) run_secs = atoi(s);
+  if (const char* p = getenv("LIVOX_POINTS_PER_FRAME")) g_pts_per_frame = (size_t)atol(p);
 
   if (!LivoxLidarSdkInit(argv[1])) {            // 1. 初始化(读 config.json: cmd/point 端口、host_ip、广播域)
     printf("Livox Init Failed\n");

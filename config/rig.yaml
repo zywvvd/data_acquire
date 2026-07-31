@@ -67,8 +67,9 @@ devices:
     point_data_port: 57000
     imu_data_port: 58000
     log_data_port: 59000
+    points_per_frame: 410000           # 每帧累积点数(~1s @410k点/s)
     enabled: true
-    note: "frame_cnt 恒 0, saver 按每 50000 点切帧(~10Hz)"
+    note: "frame_cnt 恒 0; saver 按 points_per_frame 切帧(~1s/帧)"
 
   # ---------------- 机械激光雷达: 禾赛 ----------------
   - name: lidar_hesai
@@ -79,6 +80,7 @@ devices:
     mac: "ec:9f:0d:01:3d:55"
     data_port: 2364                    # ⚠️ 实测目的端口 2364(非默认 2368!), 以 Pandar Console 实际值为准
     ptc_port: 9347
+    min_points: 100000                 # 完整帧~22万点; 剔<10万的启动半帧, 凑够 N 个完整帧
     web_port: 80                       # 配置页 "Pandar Console"
     enabled: true
 
@@ -91,6 +93,8 @@ devices:
     mac: "08:48:57:02:11:9c"           # OUI = Suteng Innovation(速腾)
     msop_port: 6692                    # UDP 主数据流
     difop_port: 7782                   # UDP 设备控制/状态
+    min_points: 50000                  # 帧有效性阈值: 点数<此值的残帧(difop未同步/丢包)剔除, 采满 N 个有效帧
+    min_z_span: 0.5                    # 启动首帧 difop 校准未加载→z压平; z跨度<此值(米)的帧剔除
     web_port: 80
     enabled: true
     note: "RS-Fairy 则 model=RSFAIRY(同包不同垂直角表, z 可达 26m)"
@@ -103,6 +107,8 @@ devices:
     mac: "08:48:57:04:cf:13"
     msop_port: 6695
     difop_port: 7785
+    min_points: 50000                  # 同 front: 残帧剔除阈值
+    min_z_span: 0.5                    # 同 front: z 扁帧剔除
     web_port: 80
     enabled: true
 

@@ -58,5 +58,42 @@ class RobosenseSensor(SubprocessSensor):
     def _duration(self):
         return self.spec.get("duration", 10.0)
 
+    def _min_points(self):
+        # 速腾偶有 difop 未同步 / 丢包的残帧(点数远少于正常 ~7-8 万): 按点数阈值剔除,
+        # 只把完整帧计入 manifest, 确保采满 N 个有效帧(而非含残帧的 N 个文件)。
+        return self.spec.get("min_points", 50000)
+
+    def _valid_frame(self, path):
+        if not super()._valid_frame(path):     # 先过点数阈值(base._valid_frame)
+            return False
+        # 启动首 1-2 帧 difop 垂直角校准未加载 → z 压成平面(点数够但 z 跨度≈0): 按 z 跨度剔
+        return self._z_span(path) >= self.spec.get("min_z_span", 0.5)
+
+    @staticmethod
+    def _z_span(path, target=1000):
+        # 抽样估 z 跨度(跨整帧取 ~target 个点): 判扁帧足够, 免读全量 8 万点(实时采集要快)。
+        try:
+            width = 80000
+            with open(path) as f:
+                for ln in f:
+                    if ln.startswith("WIDTH "):
+                        width = int(ln.split()[1])
+                    if ln.strip() == "DATA ascii":
+                        break
+                stride = max(1, width // target)
+                zmin = zmax = None
+                i = 0
+                for ln in f:
+                    if i % stride == 0:
+                        t = ln.split()
+                        if len(t) >= 3:
+                            z = float(t[2])
+                            zmin = z if zmin is None else min(zmin, z)
+                            zmax = z if zmax is None else max(zmax, z)
+                    i += 1
+            return (zmax - zmin) if zmin is not None else 0.0
+        except (OSError, ValueError):
+            return float("inf")    # 读失败 → 不剔, 避免误删好帧
+
     def _frame_glob(self):
         return "*.pcd"

@@ -73,11 +73,24 @@ class LivoxSensor(SubprocessSensor):
         env = dict(os.environ)
         env["LD_LIBRARY_PATH"] = LIBDIR + ":" + env.get("LD_LIBRARY_PATH", "")
         env["PCD_OUT"] = os.path.abspath(self.out_dir)
+        env["LIVOX_POINTS_PER_FRAME"] = str(self._points_per_frame())
         env["LIVOX_RUN_SECS"] = str(int(self._duration()))
         return env
 
+    def _points_per_frame(self):
+        # 每帧累积的点数阈值。默认 1000000(~2.5s @ HAP ~410k 点/s): 单帧更稠密,
+        # 而非默认 5 万点的稀疏帧。saver 读 LIVOX_POINTS_PER_FRAME 据此切帧。
+        return int(self.spec.get("points_per_frame", 1000000))
+
     def _duration(self):
-        return self.spec.get("duration", 15.0)
+        # 流式自停时长: 给了 frames 时按 points_per_frame/点率估每帧耗时, 加暖机(~7s)+余量,
+        # 确保采满 frames 个大帧; 与 spec.duration 取大值(防 record 的兜底时长不够)。
+        d = self.spec.get("duration", 15.0)
+        frames = self.spec.get("frames")
+        if frames:
+            rate = float(self.spec.get("point_rate", 410000))   # HAP 实测 ~410k 点/s
+            d = max(d, 8.0 + frames * (self._points_per_frame() / rate) + 15.0)
+        return d
 
     def _frame_glob(self):
         return "*.pcd"

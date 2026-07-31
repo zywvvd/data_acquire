@@ -91,6 +91,7 @@ class SubprocessSensor(Sensor):
         super().__init__(name, spec)
         self._proc = None
         self._seen = set()        # 已 yield 给上层的产物绝对路径
+        self._valid_cache = {}    # {path: bool} 帧有效性缓存(grab 一次只 yield new[0], 其余下轮会重扫, 缓存避免重复校验)
         self._frame = 0
         self._t0 = 0.0
         self._batch_done = False  # 批量型: 子进程是否已 run 完
@@ -119,6 +120,32 @@ class SubprocessSensor(Sensor):
     def _batch_timeout(self) -> float:
         """批量型单次 run 的超时(子类可覆盖)。"""
         return 120.0
+
+    def _min_points(self) -> Optional[int]:
+        """帧有效性阈值: PCD 点数 < 此值的视为残帧(difop 未同步 / 丢包的半帧),
+        在 _scan_new 里直接删除、不计入 manifest。None = 不过滤(默认)。"""
+        return None
+
+    def _valid_frame(self, path: str) -> bool:
+        mp = self._min_points()
+        if not mp:
+            return True
+        n = self._pcd_point_count(path)
+        return n is None or n >= mp       # 读不出点数 → 保留, 不误删
+
+    @staticmethod
+    def _pcd_point_count(path: str) -> Optional[int]:
+        """读 ASCII PCD 头里的 WIDTH(=点数)。读不到返回 None。"""
+        try:
+            with open(path) as f:
+                for ln in f:
+                    if ln.startswith("WIDTH "):
+                        return int(ln.split()[1])
+                    if ln.strip() == "DATA ascii":
+                        break
+        except (OSError, ValueError):
+            return None
+        return None
 
     # ---------------- 生命周期 ----------------
     def connect(self):
@@ -154,6 +181,16 @@ class SubprocessSensor(Sensor):
                         continue  # 正在写, 本轮跳过
                 except OSError:
                     continue
+            ok = self._valid_cache.get(p)        # 缓存: 每帧只校验一次(校验可能要读数据, 如速腾 z 跨度)
+            if ok is None:
+                ok = self._valid_frame(p)
+                self._valid_cache[p] = ok
+            if not ok:                          # 残帧: 删除且不计入
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+                continue
             out.append(p)
         return out
 

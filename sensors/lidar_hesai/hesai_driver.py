@@ -92,5 +92,9 @@ class HesaiSensor(SubprocessSensor):
     def _duration(self):
         return self.spec.get("duration", 10.0)
 
+    def _min_points(self):
+        # QT128 完整帧 ~22 万点; 启动半帧/残帧常 < 10 万。按点数阈值剔除, 凑够 N 个完整帧。
+        return self.spec.get("min_points", 100000)
+
     def _frame_glob(self):
         return "*.pcd"
