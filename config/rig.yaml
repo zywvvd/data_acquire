@@ -93,7 +93,7 @@ devices:
     mac: "08:48:57:02:11:9c"           # OUI = Suteng Innovation(速腾)
     msop_port: 6692                    # UDP 主数据流
     difop_port: 7782                   # UDP 设备控制/状态
-    min_points: 50000                  # 帧有效性阈值: 点数<此值的残帧(difop未同步/丢包)剔除, 采满 N 个有效帧
+    min_points: 80500                  # 正常帧~8.2万; 剔周期性少点帧(<8万, 约20%), 凑满 N 个完整帧
     min_z_span: 0.5                    # 启动首帧 difop 校准未加载→z压平; z跨度<此值(米)的帧剔除
     web_port: 80
     enabled: true
@@ -107,7 +107,7 @@ devices:
     mac: "08:48:57:04:cf:13"
     msop_port: 6695
     difop_port: 7785
-    min_points: 50000                  # 同 front: 残帧剔除阈值
+    min_points: 80500                  # 同 front: 剔周期性少点帧(正常~8.3万)
     min_z_span: 0.5                    # 同 front: z 扁帧剔除
     web_port: 80
     enabled: true
